@@ -58,5 +58,10 @@ def crear_pago():
     link = result["response"]["init_point"]
     return jsonify({"link": link})
 
+@app.route("/check_token")
+def check_token():
+    token = MP_TOKEN or "NO HAY TOKEN"
+    return jsonify({"token_inicio": token[:15]})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
