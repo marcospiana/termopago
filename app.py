@@ -65,11 +65,19 @@ def webhook():
 @app.route("/crear_pago")
 def crear_pago():
     sdk = mercadopago.SDK(MP_TOKEN)
-    preference = {
-        "items": [{"title": "Agua caliente 10 minutos", "quantity": 1, "unit_price": 500.0, "currency_id": "ARS"}],
-        "metadata": {"dispositivo_id": "termo_001"},
-        "notification_url": "https://web-production-94bbab.up.railway.app/webhook"
+preference = {
+    "items": [{"title": "Agua caliente 30 minutos", "quantity": 1, "unit_price": PRECIO, "currency_id": "ARS"}],
+    "metadata": {"dispositivo_id": "termo_001"},
+    "notification_url": "https://web-production-94bbab.up.railway.app/webhook",
+    "payment_methods": {
+        "excluded_payment_types": [
+            {"id": "credit_card"},
+            {"id": "ticket"},
+            {"id": "atm"}
+        ],
+        "installments": 1
     }
+}
     result = sdk.preference().create(preference)
     link = result["response"]["init_point"]
     return jsonify({"link": link})
