@@ -6,6 +6,7 @@ app = Flask(__name__)
 
 orden_pendiente = False
 MP_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
+CLAVE_SECRETA = os.environ.get("CLAVE_SECRETA")
 
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
@@ -15,9 +16,11 @@ def consultar_orden(dispositivo_id):
         return jsonify({"encender": True, "segundos": 10})
     return jsonify({"encender": False})
 
-@app.route("/simular_pago")
-def simular_pago():
+@app.route("/simular_pago/<clave>")
+def simular_pago(clave):
     global orden_pendiente
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
     orden_pendiente = True
     return "✅ Pago simulado"
 
@@ -57,11 +60,6 @@ def crear_pago():
     result = sdk.preference().create(preference)
     link = result["response"]["init_point"]
     return jsonify({"link": link})
-
-@app.route("/check_token")
-def check_token():
-    token = MP_TOKEN or "NO HAY TOKEN"
-    return jsonify({"token_inicio": token[:15]})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
