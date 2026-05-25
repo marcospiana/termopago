@@ -29,6 +29,8 @@ def get_db():
     db.row_factory = sqlite3.Row
     return db
 
+init_db()  # ← acá, después de definirla
+
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
     db = get_db()
@@ -36,13 +38,11 @@ def consultar_orden(dispositivo_id):
         "SELECT * FROM ordenes WHERE dispositivo_id=? AND estado='pendiente' ORDER BY fecha ASC LIMIT 1",
         (dispositivo_id,)
     ).fetchone()
-
     if orden:
         db.execute("UPDATE ordenes SET estado='ejecutando' WHERE id=?", (orden["id"],))
         db.commit()
         db.close()
         return jsonify({"encender": True, "segundos": orden["segundos"]})
-
     db.close()
     return jsonify({"encender": False})
 
@@ -50,7 +50,6 @@ def consultar_orden(dispositivo_id):
 def simular_pago(clave):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
-
     db = get_db()
     db.execute(
         "INSERT INTO ordenes VALUES (?,?,?,?,?)",
@@ -63,14 +62,11 @@ def simular_pago(clave):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-
     if not data or data.get("type") != "payment":
         return "ok", 200
-
     sdk = mercadopago.SDK(MP_TOKEN)
     pago_id = data["data"]["id"]
     pago = sdk.payment().get(pago_id)["response"]
-
     if pago["status"] == "approved":
         dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
         db = get_db()
@@ -81,7 +77,6 @@ def webhook():
         db.commit()
         db.close()
         print(f"✅ Pago aprobado: {pago_id}")
-
     return "ok", 200
 
 @app.route("/crear_pago")
@@ -95,23 +90,3 @@ def crear_pago():
             "currency_id": "ARS"
         }],
         "metadata": {
-            "dispositivo_id": "termo_001"
-        },
-        "notification_url": "https://web-production-94bbab.up.railway.app/webhook"
-    }
-    result = sdk.preference().create(preference)
-    link = result["response"]["init_point"]
-    return jsonify({"link": link})
-
-@app.route("/historial")
-def historial():
-    db = get_db()
-    ordenes = db.execute(
-        "SELECT * FROM ordenes ORDER BY fecha DESC LIMIT 20"
-    ).fetchall()
-    db.close()
-    return jsonify([dict(o) for o in ordenes])
-
-if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=5000)
