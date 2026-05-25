@@ -1,32 +1,67 @@
 from flask import Flask, jsonify, request
 import mercadopago
 import os
+import sqlite3
+import uuid
+from datetime import datetime
 
 app = Flask(__name__)
 
-orden_pendiente = False
 MP_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
 CLAVE_SECRETA = os.environ.get("CLAVE_SECRETA")
 
+def init_db():
+    db = sqlite3.connect("ordenes.db")
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ordenes (
+            id TEXT PRIMARY KEY,
+            dispositivo_id TEXT,
+            segundos INTEGER,
+            estado TEXT,
+            fecha TEXT
+        )
+    """)
+    db.commit()
+    db.close()
+
+def get_db():
+    db = sqlite3.connect("ordenes.db")
+    db.row_factory = sqlite3.Row
+    return db
+
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
-    global orden_pendiente
-    if orden_pendiente:
-        orden_pendiente = False
-        return jsonify({"encender": True, "segundos": 10})
+    db = get_db()
+    orden = db.execute(
+        "SELECT * FROM ordenes WHERE dispositivo_id=? AND estado='pendiente' ORDER BY fecha ASC LIMIT 1",
+        (dispositivo_id,)
+    ).fetchone()
+
+    if orden:
+        db.execute("UPDATE ordenes SET estado='ejecutando' WHERE id=?", (orden["id"],))
+        db.commit()
+        db.close()
+        return jsonify({"encender": True, "segundos": orden["segundos"]})
+
+    db.close()
     return jsonify({"encender": False})
 
 @app.route("/simular_pago/<clave>")
 def simular_pago(clave):
-    global orden_pendiente
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
-    orden_pendiente = True
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO ordenes VALUES (?,?,?,?,?)",
+        (str(uuid.uuid4()), "termo_001", 10, "pendiente", datetime.now().isoformat())
+    )
+    db.commit()
+    db.close()
     return "✅ Pago simulado"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    global orden_pendiente
     data = request.json
 
     if not data or data.get("type") != "payment":
@@ -37,7 +72,14 @@ def webhook():
     pago = sdk.payment().get(pago_id)["response"]
 
     if pago["status"] == "approved":
-        orden_pendiente = True
+        dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
+        db = get_db()
+        db.execute(
+            "INSERT INTO ordenes VALUES (?,?,?,?,?)",
+            (str(uuid.uuid4()), dispositivo_id, 10, "pendiente", datetime.now().isoformat())
+        )
+        db.commit()
+        db.close()
         print(f"✅ Pago aprobado: {pago_id}")
 
     return "ok", 200
@@ -61,5 +103,15 @@ def crear_pago():
     link = result["response"]["init_point"]
     return jsonify({"link": link})
 
+@app.route("/historial")
+def historial():
+    db = get_db()
+    ordenes = db.execute(
+        "SELECT * FROM ordenes ORDER BY fecha DESC LIMIT 20"
+    ).fetchall()
+    db.close()
+    return jsonify([dict(o) for o in ordenes])
+
 if __name__ == "__main__":
+    init_db()
     app.run(host="0.0.0.0", port=5000)
