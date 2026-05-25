@@ -1,0 +1,128 @@
+================================================================
+TERMOPAGO — Sistema de cobro automático con MercadoPago
+================================================================
+Autor: Marcos Piana
+Fecha: Mayo 2026
+
+----------------------------------------------------------------
+DESCRIPCIÓN
+----------------------------------------------------------------
+Sistema que permite cobrar por el uso de servicios (agua caliente,
+inflado, aspirado) mediante un código QR y MercadoPago.
+El cliente escanea el QR, paga, y el relé se activa automáticamente
+por el tiempo configurado.
+
+----------------------------------------------------------------
+ARQUITECTURA
+----------------------------------------------------------------
+[Cliente escanea QR] → [MercadoPago] → [Webhook] → [Railway]
+                                                         ↓
+                                                   [NodeMCU]
+                                                         ↓
+                                                     [Relé ON]
+
+----------------------------------------------------------------
+HARDWARE
+----------------------------------------------------------------
+- NodeMCU ESP8266
+- Módulo relé 1 canal (lógica invertida — LOW=ON, HIGH=OFF)
+- Display LCD 16x2 con módulo I2C (dirección 0x27)
+- Fuente 5V externa para el LCD
+
+CONEXIONES:
+  Relé:
+    IN   → D1
+    VCC  → 3.3V (usar 3.3V por compatibilidad con NodeMCU)
+    GND  → GND
+
+  LCD I2C:
+    VCC  → 5V externo
+    GND  → GND
+    SDA  → D2
+    SCL  → D3
+
+----------------------------------------------------------------
+SOFTWARE — NODEMCU
+----------------------------------------------------------------
+Librerías necesarias (Arduino IDE):
+  - ESP8266WiFi (incluida con el paquete ESP8266)
+  - ESP8266HTTPClient (incluida con el paquete ESP8266)
+  - ArduinoJson (de Benoit Blanchon)
+  - WiFiManager (de tzapu)
+  - hd44780 (de Bill Perry)
+
+Configuración WiFi:
+  - Primera vez: el NodeMCU crea la red "TermoPago"
+  - Conectarse desde el celular a esa red
+  - Entrar a 192.168.4.1 si no abre automáticamente
+  - Elegir red y poner contraseña
+  - El NodeMCU recuerda la red para siempre
+
+----------------------------------------------------------------
+SOFTWARE — BACKEND
+----------------------------------------------------------------
+URL: https://web-production-94bbab.up.railway.app
+
+Rutas disponibles:
+  GET  /orden/<dispositivo_id>     → el NodeMCU consulta si hay orden
+  GET  /simular_pago/<clave>       → simular pago para pruebas
+  POST /webhook                    → recibe notificaciones de MP
+  GET  /crear_pago                 → genera link de pago
+  GET  /historial                  → ver últimos 20 pagos
+
+Clave para simular pago:
+  https://web-production-94bbab.up.railway.app/simular_pago/termo2026$
+
+Variables de entorno en Railway:
+  MP_ACCESS_TOKEN = (token de producción APP_USR-)
+  CLAVE_SECRETA   = termo2026$
+
+----------------------------------------------------------------
+MERCADOPAGO
+----------------------------------------------------------------
+- App: termopago
+- Credenciales: Productivas (APP_USR-)
+- Webhook configurado en: developers.mercadopago.com
+- Webhook URL: https://web-production-94bbab.up.railway.app/webhook
+
+----------------------------------------------------------------
+QR
+----------------------------------------------------------------
+- Generado en goqr.me
+- Link: https://web-production-94bbab.up.railway.app/crear_pago
+  (este link genera el link de pago real)
+- Tamaño mínimo impresión: 6x6 cm
+- Plastificar para uso exterior
+
+----------------------------------------------------------------
+DISPOSITIVOS CONFIGURADOS
+----------------------------------------------------------------
+- termo_001 → Agua caliente → $500 → 10 seg (cambiar a 30 min)
+
+----------------------------------------------------------------
+SEGURIDAD
+----------------------------------------------------------------
+- /simular_pago sin clave → 404
+- /simular_pago/termo2026$ → solo para pruebas del dueño
+- Access Token guardado en Railway (no en el código)
+- Base de datos SQLite para no perder pagos si Railway reinicia
+
+----------------------------------------------------------------
+PENDIENTE / PRÓXIMOS PASOS
+----------------------------------------------------------------
+[ ] Cambiar 10 segundos a 30 minutos reales en producción
+[ ] Agregar infladora (infla_001) y aspiradora (aspi_001)
+[ ] Migrar a ESP32 DevKit V1 38 pines cuando llegue el hardware
+[ ] Agregar verificación de firma del webhook de MercadoPago
+[ ] Panel web para ver pagos y estado de dispositivos
+[ ] Caja estanca IP65 para el hardware
+[ ] Fusible 10A en la entrada 220V
+[ ] WebSockets para respuesta instantánea
+
+----------------------------------------------------------------
+COSTOS OPERATIVOS
+----------------------------------------------------------------
+- Railway: $5 USD/mes
+- MercadoPago: comisión por transacción (~5.99%)
+
+================================================================
