@@ -73,7 +73,12 @@ preference = {
         "excluded_payment_types": [
             {"id": "credit_card"},
             {"id": "ticket"},
-            {"id": "atm"}
+            {"id": "atm"},
+            {"id": "prepaid_card"}
+        ],
+        "excluded_payment_methods": [
+            {"id": "rapipago"},
+            {"id": "pagofacil"}
         ],
         "installments": 1
     }
