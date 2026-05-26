@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, redirect
 import mercadopago
 import os
 import sqlite3
@@ -86,7 +86,7 @@ def crear_pago():
     }
     result = sdk.preference().create(preference)
     link = result["response"]["init_point"]
-    return jsonify({"link": link})
+    return redirect(link)
 
 @app.route("/historial")
 def historial():
