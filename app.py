@@ -130,7 +130,7 @@ def webhook():
 def ver_sucursales():
     headers = {"Authorization": f"Bearer {MP_TOKEN}"}
     r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores", headers=headers)
-    return jsonify(r.json())
+    return r.text, r.status_code
 
 # ─── Crear sucursal y caja (ejecutar una sola vez) ───────────────
 
