@@ -154,7 +154,7 @@ def setup_qr(clave):
             "street_name": "Concordia",
             "city_name": "Concordia",
             "state_name": "Entre Ríos",
-            "country_name": "Argentina",
+            "country_name": "AR",
             "latitude": -31.3927,
             "longitude": -58.0157
         },
