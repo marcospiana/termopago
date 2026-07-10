@@ -45,6 +45,44 @@ def mp_headers():
         "Content-Type": "application/json"
     }
 
+EXTERNAL_POS_QR = "default"   # external_id de la caja QRtermo
+ultimo_rearme = None          # se re-arma al primer polling tras cada deploy
+
+def rearmar_qr():
+    """Carga la orden de $500 al QR de la caja. Idempotente: si ya hay
+    una orden activa MP devuelve error y se ignora."""
+    global ultimo_rearme
+    headers = mp_headers()
+    headers["X-Idempotency-Key"] = str(uuid.uuid4())
+    monto = f"{PRECIO:.2f}"
+    orden = {
+        "type": "qr",
+        "external_reference": "termo_001",
+        "description": "Agua caliente 30 minutos",
+        "expiration_time": "PT3H",
+        "total_amount": monto,
+        "config": {"qr": {"external_pos_id": EXTERNAL_POS_QR, "mode": "static"}},
+        "transactions": {"payments": [{"amount": monto}]},
+        "items": [{
+            "title": "Agua caliente 30 minutos",
+            "unit_price": monto,
+            "quantity": 1,
+            "unit_measure": "unit",
+            "external_code": "AGUA001"
+        }]
+    }
+    try:
+        r = requests.post("https://api.mercadopago.com/v1/orders", json=orden, headers=headers, timeout=10)
+        if r.status_code == 201:
+            ultimo_rearme = datetime.now()
+            print("QR re-armado")
+        else:
+            # si ya hay orden activa, contarlo como armado para no insistir
+            ultimo_rearme = datetime.now()
+            print(f"Re-arme QR: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"Error re-armando QR: {e}")
+
 def insertar_orden(orden_id, dispositivo_id, segundos):
     """Inserta una orden. El PK evita duplicados si MP notifica dos veces."""
     conn = get_db()
@@ -61,6 +99,9 @@ def insertar_orden(orden_id, dispositivo_id, segundos):
 
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
+    # re-armar el QR si nunca se armó o si pasaron más de 2,5 horas
+    if ultimo_rearme is None or (datetime.now() - ultimo_rearme).total_seconds() > 9000:
+        rearmar_qr()
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -124,6 +165,7 @@ def webhook():
             dispositivo_id = order.get("external_reference", "termo_001")
             insertar_orden(f"ord_{order_id}", dispositivo_id, 1800)
             print(f"Pago QR (Orders API) aprobado para {dispositivo_id}")
+            rearmar_qr()  # dejar el QR listo para el próximo cliente
         return "ok", 200
 
     if topic == "payment":
