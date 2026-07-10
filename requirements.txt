@@ -1,3 +1,4 @@
 flask
-gunicorn
 mercadopago
+psycopg2-binary
+gunicorn
