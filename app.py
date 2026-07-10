@@ -178,9 +178,8 @@ def setup_qr(clave):
         "name": "Caja TermoPago 001",
         "fixed_amount": True,
         "store_id": store_id,
-        "external_store_id": "termo_sucursal_001",
-        "external_id": "termo001",
-        "notification_url": "https://web-production-94bbab.up.railway.app/webhook"
+        "external_store_id": "termo_sucursal_002",
+        "external_id": "termo001"
     }
 
     r2 = requests.post(
