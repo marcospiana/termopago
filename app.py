@@ -33,6 +33,12 @@ def init_db():
             fecha         TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            clave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -45,16 +51,57 @@ def mp_headers():
         "Content-Type": "application/json"
     }
 
+# ─── Configuración en base de datos ──────────────────────────────
+
+def get_config(clave_cfg, defecto):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT valor FROM config WHERE clave=%s", (clave_cfg,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row["valor"] if row else defecto
+
+def set_config(clave_cfg, valor):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO config VALUES (%s, %s) ON CONFLICT (clave) DO UPDATE SET valor=EXCLUDED.valor",
+        (clave_cfg, str(valor))
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def precio_actual():
+    return float(get_config("precio", str(PRECIO)))
+
+def segundos_actual():
+    return int(get_config("segundos", "1800"))
+
 EXTERNAL_POS_QR = "default"   # external_id de la caja QRtermo
 ultimo_rearme = None          # se re-arma al primer polling tras cada deploy
 
+def cancelar_orden_qr():
+    """Cancela la orden activa del QR (si hay una registrada)."""
+    orden_id = get_config("orden_qr_id", None)
+    if not orden_id:
+        return
+    headers = mp_headers()
+    headers["X-Idempotency-Key"] = str(uuid.uuid4())
+    try:
+        r = requests.post(f"https://api.mercadopago.com/v1/orders/{orden_id}/cancel", headers=headers, timeout=10)
+        print(f"Cancelación de orden {orden_id}: {r.status_code}")
+    except Exception as e:
+        print(f"Error cancelando orden: {e}")
+
 def rearmar_qr():
-    """Carga la orden de $500 al QR de la caja. Idempotente: si ya hay
-    una orden activa MP devuelve error y se ignora."""
+    """Carga la orden al QR de la caja con el precio configurado.
+    Idempotente: si ya hay una orden activa MP devuelve error y se ignora."""
     global ultimo_rearme
     headers = mp_headers()
     headers["X-Idempotency-Key"] = str(uuid.uuid4())
-    monto = f"{PRECIO:.2f}"
+    monto = f"{precio_actual():.2f}"
     orden = {
         "type": "qr",
         "external_reference": "termo_001",
@@ -75,6 +122,7 @@ def rearmar_qr():
         r = requests.post("https://api.mercadopago.com/v1/orders", json=orden, headers=headers, timeout=10)
         if r.status_code == 201:
             ultimo_rearme = datetime.now()
+            set_config("orden_qr_id", r.json().get("id", ""))
             print("QR re-armado")
         else:
             # si ya hay orden activa, contarlo como armado para no insistir
@@ -152,7 +200,7 @@ def webhook():
         if pagos_aprobados and order.get("order_status") == "paid":
             dispositivo_id = order.get("external_reference", "termo_001")
             # id derivado del merchant_order: si MP notifica 2 veces, no duplica
-            insertar_orden(f"mo_{order['id']}", dispositivo_id, 1800)
+            insertar_orden(f"mo_{order['id']}", dispositivo_id, segundos_actual())
             print(f"Pago QR aprobado para {dispositivo_id}")
         return "ok", 200
 
@@ -163,7 +211,7 @@ def webhook():
         order = r.json()
         if order.get("status") == "processed":
             dispositivo_id = order.get("external_reference", "termo_001")
-            insertar_orden(f"ord_{order_id}", dispositivo_id, 1800)
+            insertar_orden(f"ord_{order_id}", dispositivo_id, segundos_actual())
             print(f"Pago QR (Orders API) aprobado para {dispositivo_id}")
             rearmar_qr()  # dejar el QR listo para el próximo cliente
         return "ok", 200
@@ -174,11 +222,61 @@ def webhook():
         pago = sdk.payment().get(pago_id)["response"]
         if pago.get("status") == "approved":
             dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
-            insertar_orden(f"pay_{pago_id}", dispositivo_id, 1800)
+            insertar_orden(f"pay_{pago_id}", dispositivo_id, segundos_actual())
             print(f"Pago checkout aprobado: {pago_id}")
         return "ok", 200
 
     return "ok", 200
+
+# ─── Panel de configuración ──────────────────────────────────────
+
+@app.route("/config/<clave>", methods=["GET", "POST"])
+def config_panel(clave):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    mensaje = ""
+    if request.method == "POST":
+        try:
+            nuevo_precio = float(request.form["precio"])
+            nuevos_minutos = int(request.form["minutos"])
+            if nuevo_precio <= 0 or nuevos_minutos <= 0:
+                raise ValueError
+            precio_cambio = nuevo_precio != precio_actual()
+            set_config("precio", nuevo_precio)
+            set_config("segundos", nuevos_minutos * 60)
+            if precio_cambio:
+                # el QR tiene cargada una orden con el precio viejo: cancelar y re-armar
+                cancelar_orden_qr()
+                rearmar_qr()
+                mensaje = "✅ Guardado. El QR ya muestra el precio nuevo."
+            else:
+                mensaje = "✅ Guardado."
+        except (ValueError, KeyError):
+            mensaje = "❌ Valores inválidos, no se guardó nada."
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - Configuración</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 400px; margin: 40px auto; padding: 0 16px; }}
+  label {{ display: block; margin-top: 16px; font-weight: bold; }}
+  input {{ width: 100%; padding: 10px; font-size: 18px; margin-top: 4px; box-sizing: border-box; }}
+  button {{ margin-top: 20px; width: 100%; padding: 14px; font-size: 18px;
+           background: #009ee3; color: white; border: none; border-radius: 6px; }}
+  .msg {{ margin-top: 16px; font-size: 16px; }}
+</style></head><body>
+<h2>⚙️ TermoPago</h2>
+<form method="post">
+  <label>Precio (ARS)</label>
+  <input type="number" name="precio" step="0.01" min="1" value="{precio_actual():g}">
+  <label>Tiempo de servicio (minutos)</label>
+  <input type="number" name="minutos" min="1" value="{segundos_actual() // 60}">
+  <button type="submit">Guardar</button>
+</form>
+<p class="msg">{mensaje}</p>
+</body></html>"""
 
 # ─── Diagnóstico de credenciales y QR ────────────────────────────
 
@@ -316,7 +414,7 @@ def crear_orden_qr(clave, external_pos_id):
     headers = mp_headers()
     headers["X-Idempotency-Key"] = str(uuid.uuid4())
 
-    monto = f"{PRECIO:.2f}"
+    monto = f"{precio_actual():.2f}"
     orden = {
         "type": "qr",
         "external_reference": "termo_001",
@@ -350,7 +448,7 @@ def crear_orden_qr(clave, external_pos_id):
 def crear_pago():
     sdk = mercadopago.SDK(MP_TOKEN)
     preference = {
-        "items": [{"title": "Agua caliente 30 minutos", "quantity": 1, "unit_price": PRECIO, "currency_id": "ARS"}],
+        "items": [{"title": "Agua caliente 30 minutos", "quantity": 1, "unit_price": precio_actual(), "currency_id": "ARS"}],
         "metadata": {"dispositivo_id": "termo_001"},
         "notification_url": f"{BASE_URL}/webhook",
         "payment_methods": {
