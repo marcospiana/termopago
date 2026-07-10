@@ -14,6 +14,7 @@ CLAVE_SECRETA = os.environ.get("CLAVE_SECRETA")
 PRECIO        = float(os.environ.get("PRECIO", "500"))
 DATABASE_URL  = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
 USER_ID       = "178328412"
+BASE_URL      = "https://web-production-94bbab.up.railway.app"
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -37,6 +38,24 @@ def init_db():
     conn.close()
 
 init_db()
+
+def mp_headers():
+    return {
+        "Authorization": f"Bearer {MP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+def insertar_orden(orden_id, dispositivo_id, segundos):
+    """Inserta una orden. El PK evita duplicados si MP notifica dos veces."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+        (orden_id, dispositivo_id, segundos, "pendiente", datetime.now().isoformat())
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
 # ─── Rutas del ESP32 ────────────────────────────────────────────
 
@@ -65,15 +84,7 @@ def consultar_orden(dispositivo_id):
 def simular_pago(clave):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s)",
-        (str(uuid.uuid4()), "termo_001", 10, "pendiente", datetime.now().isoformat())
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    insertar_orden(str(uuid.uuid4()), "termo_001", 10)
     return "Pago simulado"
 
 # ─── Webhook MercadoPago ─────────────────────────────────────────
@@ -84,142 +95,180 @@ def webhook():
     if not data:
         return "ok", 200
 
-    if data.get("type") == "merchant_order":
-        order_id = data["data"]["id"]
-        headers = {"Authorization": f"Bearer {MP_TOKEN}"}
-        r = requests.get(f"https://api.mercadopago.com/merchant_orders/{order_id}", headers=headers)
+    # Los pagos QR llegan como merchant_order. MP los manda en dos formatos:
+    #   IPN:     {"topic": "merchant_order", "resource": "https://.../merchant_orders/123"}
+    #   Webhook: {"type": "merchant_order", "data": {"id": "123"}}
+    topic = data.get("topic") or data.get("type")
+
+    if topic == "merchant_order":
+        if "resource" in data:
+            url = data["resource"]
+        else:
+            url = f"https://api.mercadopago.com/merchant_orders/{data['data']['id']}"
+        r = requests.get(url, headers=mp_headers())
         order = r.json()
         pagos_aprobados = [p for p in order.get("payments", []) if p["status"] == "approved"]
         if pagos_aprobados and order.get("order_status") == "paid":
             dispositivo_id = order.get("external_reference", "termo_001")
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s)",
-                (str(uuid.uuid4()), dispositivo_id, 1800, "pendiente", datetime.now().isoformat())
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
+            # id derivado del merchant_order: si MP notifica 2 veces, no duplica
+            insertar_orden(f"mo_{order['id']}", dispositivo_id, 1800)
             print(f"Pago QR aprobado para {dispositivo_id}")
         return "ok", 200
 
-    if data.get("type") == "payment":
+    if topic == "payment":
         sdk = mercadopago.SDK(MP_TOKEN)
         pago_id = data["data"]["id"]
         pago = sdk.payment().get(pago_id)["response"]
-        if pago["status"] == "approved":
+        if pago.get("status") == "approved":
             dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s)",
-                (str(uuid.uuid4()), dispositivo_id, 1800, "pendiente", datetime.now().isoformat())
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
+            insertar_orden(f"pay_{pago_id}", dispositivo_id, 1800)
             print(f"Pago checkout aprobado: {pago_id}")
         return "ok", 200
 
     return "ok", 200
 
+# ─── Diagnóstico de credenciales y QR ────────────────────────────
+
+@app.route("/diagnostico/<clave>")
+def diagnostico(clave):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    resultado = {}
+
+    # 1. ¿El token es válido y de qué cuenta es?
+    r = requests.get("https://api.mercadopago.com/users/me", headers=mp_headers())
+    me = r.json()
+    resultado["token"] = {
+        "status": r.status_code,
+        "user_id_del_token": me.get("id"),
+        "user_id_configurado": USER_ID,
+        "coinciden": str(me.get("id")) == USER_ID,
+        "nickname": me.get("nickname"),
+        "site": me.get("site_id"),
+        "es_cuenta_test": bool(me.get("tags") and "test_user" in me.get("tags", []))
+    }
+
+    # 2. Sucursales
+    r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores/search", headers=mp_headers())
+    resultado["sucursales"] = {"status": r.status_code, "respuesta": r.json() if r.text else None}
+
+    # 3. Cajas
+    r = requests.get("https://api.mercadopago.com/pos", headers=mp_headers())
+    resultado["cajas"] = {"status": r.status_code, "respuesta": r.json() if r.text else None}
+
+    return jsonify(resultado)
+
 # ─── Ver sucursales existentes ───────────────────────────────────
 
 @app.route("/ver_sucursales")
 def ver_sucursales():
-    headers = {"Authorization": f"Bearer {MP_TOKEN}"}
-    r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores", headers=headers)
-    return r.text, r.status_code
+    # El endpoint correcto es /stores/search (GET /users/{id}/stores no existe)
+    r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores/search", headers=mp_headers())
+    return r.text, r.status_code, {"Content-Type": "application/json"}
 
-# ─── Crear sucursal y caja (ejecutar una sola vez) ───────────────
+@app.route("/ver_cajas")
+def ver_cajas():
+    r = requests.get("https://api.mercadopago.com/pos", headers=mp_headers())
+    return r.text, r.status_code, {"Content-Type": "application/json"}
+
+# ─── Crear sucursal y caja (idempotente, se puede llamar varias veces) ───
 
 @app.route("/setup_qr/<clave>")
 def setup_qr(clave):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
 
-    headers = {
-        "Authorization": f"Bearer {MP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    EXTERNAL_STORE_ID = "TERMOSUC001"
+    EXTERNAL_POS_ID   = "TERMOPOS001"
 
-    sucursal = {
-        "name": "TermoPago Concordia",
-        "business_hours": {
-            "monday": [{"open": "00:00", "close": "23:59"}],
-            "tuesday": [{"open": "00:00", "close": "23:59"}],
-            "wednesday": [{"open": "00:00", "close": "23:59"}],
-            "thursday": [{"open": "00:00", "close": "23:59"}],
-            "friday": [{"open": "00:00", "close": "23:59"}],
-            "saturday": [{"open": "00:00", "close": "23:59"}],
-            "sunday": [{"open": "00:00", "close": "23:59"}]
-        },
-        "location": {
-            "street_name": "Concordia",
-            "city_name": "Concordia",
-            "state_name": "Entre Ríos",
-            "zip_code": "3200",
-            "latitude": -31.3927,
-            "longitude": -58.0157
-        },
-        "external_id": "termo_sucursal_003"
-    }
-
-    r1 = requests.post(
-        f"https://api.mercadopago.com/users/{USER_ID}/stores",
-        json=sucursal,
-        headers=headers
+    # 1. Buscar sucursal existente
+    r = requests.get(
+        f"https://api.mercadopago.com/users/{USER_ID}/stores/search",
+        params={"external_id": EXTERNAL_STORE_ID},
+        headers=mp_headers()
     )
-    store = r1.json()
+    existentes = r.json().get("results", []) if r.status_code == 200 else []
 
-    if "id" not in store:
-        return jsonify({"error": "No se pudo crear la sucursal", "detalle": store}), 400
+    if existentes:
+        store = existentes[0]
+    else:
+        sucursal = {
+            "name": "TermoPago Concordia",
+            "business_hours": {
+                dia: [{"open": "00:00", "close": "23:59"}]
+                for dia in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            },
+            "location": {
+                "street_name": "Concordia",
+                "street_number": "1",
+                "city_name": "Concordia",
+                "state_name": "Entre Ríos",
+                "zip_code": "3200",
+                "latitude": -31.3927,
+                "longitude": -58.0157
+            },
+            "external_id": EXTERNAL_STORE_ID
+        }
+        r1 = requests.post(
+            f"https://api.mercadopago.com/users/{USER_ID}/stores",
+            json=sucursal, headers=mp_headers()
+        )
+        store = r1.json()
+        if "id" not in store:
+            return jsonify({"error": "No se pudo crear la sucursal", "detalle": store}), 400
 
     store_id = store["id"]
 
-    caja = {
-        "name": "Caja TermoPago 001",
-        "fixed_amount": True,
-        "store_id": store_id,
-        "external_store_id": "termo_sucursal_003",
-        "external_id": "termo001"
-    }
-
-    r2 = requests.post(
-        f"https://api.mercadopago.com/pos",
-        json=caja,
-        headers=headers
+    # 2. Buscar caja existente
+    r = requests.get(
+        "https://api.mercadopago.com/pos",
+        params={"external_id": EXTERNAL_POS_ID},
+        headers=mp_headers()
     )
-    pos = r2.json()
+    cajas = r.json().get("results", []) if r.status_code == 200 else []
 
-    if "id" not in pos:
-        return jsonify({"error": "No se pudo crear la caja", "detalle": pos}), 400
+    if cajas:
+        pos = cajas[0]
+    else:
+        caja = {
+            "name": "Caja TermoPago 001",
+            "fixed_amount": True,
+            "store_id": int(store_id),
+            "external_store_id": EXTERNAL_STORE_ID,
+            "external_id": EXTERNAL_POS_ID,
+            "category": 621102
+        }
+        r2 = requests.post("https://api.mercadopago.com/pos", json=caja, headers=mp_headers())
+        pos = r2.json()
+        if "id" not in pos:
+            return jsonify({"error": "No se pudo crear la caja", "detalle": pos}), 400
 
     return jsonify({
         "sucursal_id": store_id,
         "caja_id": pos["id"],
-        "qr_link": pos.get("qr", {}).get("image"),
+        "external_pos_id": EXTERNAL_POS_ID,
+        "qr_imagen": pos.get("qr", {}).get("image"),
         "qr_data": pos.get("qr", {}).get("template_document"),
-        "pos_completo": pos
+        "siguiente_paso": f"GET /orden_qr/<clave>/{EXTERNAL_POS_ID} para cargar la orden al QR"
     })
 
-# ─── Asignar orden al QR ─────────────────────────────────────────
+# ─── Asignar orden al QR (usar el external_id de la caja, ej. TERMOPOS001) ───
 
-@app.route("/orden_qr/<clave>/<pos_id>")
-def crear_orden_qr(clave, pos_id):
+@app.route("/orden_qr/<clave>/<external_pos_id>")
+def crear_orden_qr(clave, external_pos_id):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
 
-    headers = {
-        "Authorization": f"Bearer {MP_TOKEN}",
-        "Content-Type": "application/json",
-        "x-idempotency-key": str(uuid.uuid4())
-    }
+    headers = mp_headers()
+    headers["x-idempotency-key"] = str(uuid.uuid4())
 
     orden = {
         "external_reference": "termo_001",
-        "notification_url": "https://web-production-94bbab.up.railway.app/webhook",
+        "title": "Agua caliente 30 minutos",
+        "description": "Servicio de agua caliente por 30 minutos",
+        "notification_url": f"{BASE_URL}/webhook",
+        "total_amount": PRECIO,
         "items": [{
             "sku_number": "AGUA001",
             "category": "services",
@@ -229,17 +278,15 @@ def crear_orden_qr(clave, pos_id):
             "quantity": 1,
             "unit_measure": "unit",
             "total_amount": PRECIO
-        }],
-        "total_amount": PRECIO
+        }]
     }
 
     r = requests.put(
-        f"https://api.mercadopago.com/instore/orders/qr/seller/collectors/{USER_ID}/pos/{pos_id}/qrs",
+        f"https://api.mercadopago.com/instore/orders/qr/seller/collectors/{USER_ID}/pos/{external_pos_id}/qrs",
         json=orden,
         headers=headers
     )
-
-    return jsonify(r.json())
+    return (r.text or '{"ok": true, "nota": "Orden cargada al QR"}'), r.status_code, {"Content-Type": "application/json"}
 
 # ─── Checkout Pro ─────────────────────────────────────────────────
 
@@ -249,7 +296,7 @@ def crear_pago():
     preference = {
         "items": [{"title": "Agua caliente 30 minutos", "quantity": 1, "unit_price": PRECIO, "currency_id": "ARS"}],
         "metadata": {"dispositivo_id": "termo_001"},
-        "notification_url": "https://web-production-94bbab.up.railway.app/webhook",
+        "notification_url": f"{BASE_URL}/webhook",
         "payment_methods": {
             "excluded_payment_types": [
                 {"id": "credit_card"},
