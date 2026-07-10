@@ -39,6 +39,7 @@ def init_db():
             valor TEXT
         )
     """)
+    cur.execute("ALTER TABLE ordenes ADD COLUMN IF NOT EXISTS inicio TEXT")
     conn.commit()
     cur.close()
     conn.close()
@@ -99,6 +100,20 @@ def rearmar_qr():
     """Carga la orden al QR de la caja con el precio configurado.
     Idempotente: si ya hay una orden activa MP devuelve error y se ignora."""
     global ultimo_rearme
+
+    # Red de seguridad: si la orden anterior fue pagada pero el webhook
+    # se perdió, registrarla acá (el PK evita duplicados si ya se registró).
+    anterior = get_config("orden_qr_id", None)
+    if anterior:
+        try:
+            r = requests.get(f"https://api.mercadopago.com/v1/orders/{anterior}", headers=mp_headers(), timeout=10)
+            if r.status_code == 200 and r.json().get("status") == "processed":
+                o = r.json()
+                insertar_orden(f"ord_{anterior}", o.get("external_reference", "termo_001"), segundos_actual())
+                print(f"Pago recuperado por verificación directa: {anterior}")
+        except Exception as e:
+            print(f"Error verificando orden anterior: {e}")
+
     headers = mp_headers()
     headers["X-Idempotency-Key"] = str(uuid.uuid4())
     monto = f"{precio_actual():.2f}"
@@ -158,14 +173,45 @@ def consultar_orden(dispositivo_id):
     )
     orden = cur.fetchone()
     if orden:
-        cur.execute("UPDATE ordenes SET estado='ejecutando' WHERE id=%s", (orden["id"],))
+        cur.execute(
+            "UPDATE ordenes SET estado='ejecutando', inicio=%s WHERE id=%s",
+            (datetime.now().isoformat(), orden["id"])
+        )
         conn.commit()
         cur.close()
         conn.close()
-        return jsonify({"encender": True, "segundos": orden["segundos"]})
+        return jsonify({"encender": True, "segundos": orden["segundos"], "orden_id": orden["id"]})
+
+    # Recuperación tras corte de luz / reinicio: si hay una orden en ejecución
+    # que no se completó y todavía le queda tiempo, devolver el restante.
+    cur.execute(
+        "SELECT * FROM ordenes WHERE dispositivo_id=%s AND estado='ejecutando' AND inicio IS NOT NULL "
+        "ORDER BY inicio DESC LIMIT 1",
+        (dispositivo_id,)
+    )
+    ejecutando = cur.fetchone()
     cur.close()
     conn.close()
+    if ejecutando:
+        try:
+            transcurrido = (datetime.now() - datetime.fromisoformat(ejecutando["inicio"])).total_seconds()
+            restante = int(ejecutando["segundos"] - transcurrido)
+            if restante > 10:
+                return jsonify({"encender": True, "segundos": restante, "orden_id": ejecutando["id"]})
+        except (ValueError, TypeError):
+            pass
     return jsonify({"encender": False})
+
+@app.route("/completar/<orden_id>")
+def completar_orden(orden_id):
+    """El ESP32 avisa que terminó el servicio de una orden."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE ordenes SET estado='completada' WHERE id=%s", (orden_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return "ok"
 
 # ─── Simulación de pago para pruebas ────────────────────────────
 
