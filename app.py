@@ -105,7 +105,7 @@ def webhook():
             print(f"Pago QR aprobado para {dispositivo_id}")
         return "ok", 200
 
-    # Webhook de Checkout Pro (mantener compatibilidad)
+    # Webhook de Checkout Pro
     if data.get("type") == "payment":
         sdk = mercadopago.SDK(MP_TOKEN)
         pago_id = data["data"]["id"]
@@ -153,8 +153,8 @@ def setup_qr(clave):
         "location": {
             "street_name": "Concordia",
             "city_name": "Concordia",
-            "state_name": "Entre Ríos",
-            "country_name": "AR",
+            "state_name": "Entre Rios",
+            "zip_code": "3200",
             "latitude": -31.3927,
             "longitude": -58.0157
         },
@@ -201,7 +201,7 @@ def setup_qr(clave):
         "pos_completo": pos
     })
 
-# ─── Asignar orden al QR (cliente escanea → ve el precio) ────────
+# ─── Asignar orden al QR ─────────────────────────────────────────
 
 @app.route("/orden_qr/<clave>/<pos_id>")
 def crear_orden_qr(clave, pos_id):
@@ -238,7 +238,7 @@ def crear_orden_qr(clave, pos_id):
 
     return jsonify(r.json())
 
-# ─── Checkout Pro (mantener para compatibilidad) ─────────────────
+# ─── Checkout Pro ─────────────────────────────────────────────────
 
 @app.route("/crear_pago")
 def crear_pago():
