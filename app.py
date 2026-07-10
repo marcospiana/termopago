@@ -115,6 +115,17 @@ def webhook():
             print(f"Pago QR aprobado para {dispositivo_id}")
         return "ok", 200
 
+    # Notificaciones de la Orders API (tema "orders" configurado en el panel de MP)
+    if topic in ("order", "orders", "topic_order") or (data.get("data", {}).get("id", "") or "").startswith("ORD"):
+        order_id = data["data"]["id"]
+        r = requests.get(f"https://api.mercadopago.com/v1/orders/{order_id}", headers=mp_headers())
+        order = r.json()
+        if order.get("status") == "processed":
+            dispositivo_id = order.get("external_reference", "termo_001")
+            insertar_orden(f"ord_{order_id}", dispositivo_id, 1800)
+            print(f"Pago QR (Orders API) aprobado para {dispositivo_id}")
+        return "ok", 200
+
     if topic == "payment":
         sdk = mercadopago.SDK(MP_TOKEN)
         pago_id = data["data"]["id"]
@@ -253,7 +264,7 @@ def setup_qr(clave):
         "siguiente_paso": f"GET /orden_qr/<clave>/{EXTERNAL_POS_ID} para cargar la orden al QR"
     })
 
-# ─── Asignar orden al QR (usar el external_id de la caja, ej. TERMOPOS001) ───
+# ─── Asignar orden al QR — Orders API (usar el external_id de la caja) ───
 
 @app.route("/orden_qr/<clave>/<external_pos_id>")
 def crear_orden_qr(clave, external_pos_id):
@@ -261,32 +272,35 @@ def crear_orden_qr(clave, external_pos_id):
         return "No autorizado", 403
 
     headers = mp_headers()
-    headers["x-idempotency-key"] = str(uuid.uuid4())
+    headers["X-Idempotency-Key"] = str(uuid.uuid4())
 
+    monto = f"{PRECIO:.2f}"
     orden = {
+        "type": "qr",
         "external_reference": "termo_001",
-        "title": "Agua caliente 30 minutos",
-        "description": "Servicio de agua caliente por 30 minutos",
-        "notification_url": f"{BASE_URL}/webhook",
-        "total_amount": PRECIO,
+        "description": "Agua caliente 30 minutos",
+        "expiration_time": "PT3H",
+        "total_amount": monto,
+        "config": {
+            "qr": {
+                "external_pos_id": external_pos_id,
+                "mode": "static"
+            }
+        },
+        "transactions": {
+            "payments": [{"amount": monto}]
+        },
         "items": [{
-            "sku_number": "AGUA001",
-            "category": "services",
             "title": "Agua caliente 30 minutos",
-            "description": "Servicio de agua caliente por 30 minutos",
-            "unit_price": PRECIO,
+            "unit_price": monto,
             "quantity": 1,
             "unit_measure": "unit",
-            "total_amount": PRECIO
+            "external_code": "AGUA001"
         }]
     }
 
-    r = requests.put(
-        f"https://api.mercadopago.com/instore/orders/qr/seller/collectors/{USER_ID}/pos/{external_pos_id}/qrs",
-        json=orden,
-        headers=headers
-    )
-    return (r.text or '{"ok": true, "nota": "Orden cargada al QR"}'), r.status_code, {"Content-Type": "application/json"}
+    r = requests.post("https://api.mercadopago.com/v1/orders", json=orden, headers=headers)
+    return r.text, r.status_code, {"Content-Type": "application/json"}
 
 # ─── Checkout Pro ─────────────────────────────────────────────────
 
