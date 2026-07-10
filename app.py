@@ -1,49 +1,73 @@
 from flask import Flask, jsonify, request, redirect
 import mercadopago
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import uuid
 from datetime import datetime
 
 app = Flask(__name__)
 
-MP_TOKEN = os.environ.get("MP_ACCESS_TOKEN")
+MP_TOKEN      = os.environ.get("MP_ACCESS_TOKEN")
 CLAVE_SECRETA = os.environ.get("CLAVE_SECRETA")
-PRECIO = float(os.environ.get("PRECIO", "500"))
-
-def init_db():
-    db = sqlite3.connect("ordenes.db")
-    db.execute("CREATE TABLE IF NOT EXISTS ordenes (id TEXT PRIMARY KEY, dispositivo_id TEXT, segundos INTEGER, estado TEXT, fecha TEXT)")
-    db.commit()
-    db.close()
+PRECIO        = float(os.environ.get("PRECIO", "500"))
+DATABASE_URL  = os.environ.get("DATABASE_URL")
 
 def get_db():
-    db = sqlite3.connect("ordenes.db")
-    db.row_factory = sqlite3.Row
-    return db
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
+    return conn
+
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ordenes (
+            id            TEXT PRIMARY KEY,
+            dispositivo_id TEXT,
+            segundos      INTEGER,
+            estado        TEXT,
+            fecha         TEXT
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 init_db()
 
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
-    db = get_db()
-    orden = db.execute("SELECT * FROM ordenes WHERE dispositivo_id=? AND estado='pendiente' ORDER BY fecha ASC LIMIT 1", (dispositivo_id,)).fetchone()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM ordenes WHERE dispositivo_id=%s AND estado='pendiente' ORDER BY fecha ASC LIMIT 1",
+        (dispositivo_id,)
+    )
+    orden = cur.fetchone()
     if orden:
-        db.execute("UPDATE ordenes SET estado='ejecutando' WHERE id=?", (orden["id"],))
-        db.commit()
-        db.close()
+        cur.execute("UPDATE ordenes SET estado='ejecutando' WHERE id=%s", (orden["id"],))
+        conn.commit()
+        cur.close()
+        conn.close()
         return jsonify({"encender": True, "segundos": orden["segundos"]})
-    db.close()
+    cur.close()
+    conn.close()
     return jsonify({"encender": False})
 
 @app.route("/simular_pago/<clave>")
 def simular_pago(clave):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
-    db = get_db()
-    db.execute("INSERT INTO ordenes VALUES (?,?,?,?,?)", (str(uuid.uuid4()), "termo_001", 10, "pendiente", datetime.now().isoformat()))
-    db.commit()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s)",
+        (str(uuid.uuid4()), "termo_001", 10, "pendiente", datetime.now().isoformat())
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
     return "Pago simulado"
 
 @app.route("/webhook", methods=["POST"])
@@ -56,10 +80,15 @@ def webhook():
     pago = sdk.payment().get(pago_id)["response"]
     if pago["status"] == "approved":
         dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
-        db = get_db()
-        db.execute("INSERT INTO ordenes VALUES (?,?,?,?,?)", (str(uuid.uuid4()), dispositivo_id, 10, "pendiente", datetime.now().isoformat()))
-        db.commit()
-        db.close()
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ordenes VALUES (%s, %s, %s, %s, %s)",
+            (str(uuid.uuid4()), dispositivo_id, 1800, "pendiente", datetime.now().isoformat())
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
         print("Pago aprobado: " + str(pago_id))
     return "ok", 200
 
@@ -90,9 +119,12 @@ def crear_pago():
 
 @app.route("/historial")
 def historial():
-    db = get_db()
-    ordenes = db.execute("SELECT * FROM ordenes ORDER BY fecha DESC LIMIT 20").fetchall()
-    db.close()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM ordenes ORDER BY fecha DESC LIMIT 20")
+    ordenes = cur.fetchall()
+    cur.close()
+    conn.close()
     return jsonify([dict(o) for o in ordenes])
 
 if __name__ == "__main__":
