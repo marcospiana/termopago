@@ -11,7 +11,7 @@ app = Flask(__name__)
 MP_TOKEN      = os.environ.get("MP_ACCESS_TOKEN")
 CLAVE_SECRETA = os.environ.get("CLAVE_SECRETA")
 PRECIO        = float(os.environ.get("PRECIO", "500"))
-DATABASE_URL  = os.environ.get("DATABASE_URL")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://")
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
