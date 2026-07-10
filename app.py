@@ -153,7 +153,7 @@ def setup_qr(clave):
         "location": {
             "street_name": "Concordia",
             "city_name": "Concordia",
-            "state_name": "Entre Rios",
+            "state_name": "Entre Ríos",
             "zip_code": "3200",
             "latitude": -31.3927,
             "longitude": -58.0157
