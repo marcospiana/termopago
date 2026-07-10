@@ -158,7 +158,7 @@ def setup_qr(clave):
             "latitude": -31.3927,
             "longitude": -58.0157
         },
-        "external_id": "termo_sucursal_001"
+        "external_id": "termo_sucursal_002"
     }
 
     r1 = requests.post(
