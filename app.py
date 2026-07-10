@@ -84,7 +84,6 @@ def webhook():
     if not data:
         return "ok", 200
 
-    # Webhook de QR punto de venta
     if data.get("type") == "merchant_order":
         order_id = data["data"]["id"]
         headers = {"Authorization": f"Bearer {MP_TOKEN}"}
@@ -105,7 +104,6 @@ def webhook():
             print(f"Pago QR aprobado para {dispositivo_id}")
         return "ok", 200
 
-    # Webhook de Checkout Pro
     if data.get("type") == "payment":
         sdk = mercadopago.SDK(MP_TOKEN)
         pago_id = data["data"]["id"]
@@ -126,6 +124,14 @@ def webhook():
 
     return "ok", 200
 
+# ─── Ver sucursales existentes ───────────────────────────────────
+
+@app.route("/ver_sucursales")
+def ver_sucursales():
+    headers = {"Authorization": f"Bearer {MP_TOKEN}"}
+    r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores", headers=headers)
+    return jsonify(r.json())
+
 # ─── Crear sucursal y caja (ejecutar una sola vez) ───────────────
 
 @app.route("/setup_qr/<clave>")
@@ -138,7 +144,6 @@ def setup_qr(clave):
         "Content-Type": "application/json"
     }
 
-    # 1. Crear sucursal
     sucursal = {
         "name": "TermoPago Concordia",
         "business_hours": {
@@ -158,7 +163,7 @@ def setup_qr(clave):
             "latitude": -31.3927,
             "longitude": -58.0157
         },
-        "external_id": "termo_sucursal_002"
+        "external_id": "termo_sucursal_003"
     }
 
     r1 = requests.post(
@@ -173,12 +178,11 @@ def setup_qr(clave):
 
     store_id = store["id"]
 
-    # 2. Crear caja/POS
     caja = {
         "name": "Caja TermoPago 001",
         "fixed_amount": True,
         "store_id": store_id,
-        "external_store_id": "termo_sucursal_002",
+        "external_store_id": "termo_sucursal_003",
         "external_id": "termo001"
     }
 
