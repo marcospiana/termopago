@@ -1,0 +1,33 @@
+TERMOPAGO - ENLACES UTILES
+==========================
+(Reemplazar TU_CLAVE por el valor de CLAVE_SECRETA de Railway)
+
+CAMBIAR PRECIO Y TIEMPO (panel de configuracion):
+https://web-production-94bbab.up.railway.app/config/TU_CLAVE
+
+SIMULAR UN PAGO (prueba de 10 segundos, no cobra nada):
+https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE
+
+VER ULTIMOS PAGOS / ORDENES:
+https://web-production-94bbab.up.railway.app/historial
+
+DIAGNOSTICO (verifica credenciales de MercadoPago):
+https://web-production-94bbab.up.railway.app/diagnostico/TU_CLAVE
+
+RE-ARMAR EL QR A MANO (normalmente no hace falta, es automatico):
+https://web-production-94bbab.up.railway.app/orden_qr/TU_CLAVE/default
+
+QR PARA IMPRIMIR:
+Imagen PNG:
+https://www.mercadopago.com/instore/merchant/qr/1486831/2a4dd50156a34a58b650aa6e8b9947af78a9d610c6074fe3ac053d378037efce.png
+Plantilla PDF con marco de MercadoPago:
+https://www.mercadopago.com/instore/merchant/qr/1486831/template_2a4dd50156a34a58b650aa6e8b9947af78a9d610c6074fe3ac053d378037efce.pdf
+
+DATOS DEL SISTEMA:
+- Backend: https://web-production-94bbab.up.railway.app (Railway)
+- Codigo: https://github.com/marcospiana/termopago
+- Caja MercadoPago: "QRtermo" (id 1486831, external_id "default")
+- Sucursal: id 62703646
+- User ID MercadoPago: 178328412
+- El QR se re-arma solo cada 2,5 horas y despues de cada pago
+  (mientras el ESP32 este encendido)
