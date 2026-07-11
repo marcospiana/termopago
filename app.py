@@ -5,7 +5,9 @@ import psycopg2
 import psycopg2.extras
 import uuid
 import requests
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -20,6 +22,10 @@ BASE_URL      = "https://web-production-94bbab.up.railway.app"
 MP_CLIENT_ID     = os.environ.get("MP_CLIENT_ID")
 MP_CLIENT_SECRET = os.environ.get("MP_CLIENT_SECRET")
 FEE_PORCENTAJE   = float(os.environ.get("FEE_PORCENTAJE", "0"))  # tu comisión, ej. 10
+
+# Reembolso automático: minutos que puede esperar una orden pagada sin que
+# el equipo (offline) la ejecute, antes de devolverle el dinero al cliente
+REEMBOLSO_MINUTOS = int(os.environ.get("REEMBOLSO_MINUTOS", "5"))
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
@@ -61,6 +67,9 @@ def init_db():
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS token_env TEXT")
     # cliente: alias del cliente conectado por OAuth (tabla clientes)
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS cliente TEXT")
+    # ultimo_poll: última vez que el ESP32 del dispositivo consultó (para
+    # detectar equipos sin conexión)
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ultimo_poll TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -294,6 +303,8 @@ def consultar_orden(dispositivo_id):
     # re-armar el QR del dispositivo si nunca se armó o pasaron más de 2,5 hs
     disp = get_dispositivo(dispositivo_id)
     if disp:
+        # registrar que el equipo está vivo (para el reembolso automático)
+        actualizar_dispositivo(dispositivo_id, {"ultimo_poll": datetime.now().isoformat()})
         rearme = disp.get("ultimo_rearme")
         try:
             vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 9000
@@ -752,6 +763,77 @@ def historial():
     cur.close()
     conn.close()
     return jsonify([dict(o) for o in ordenes])
+
+# ─── Reembolso automático de pagos no atendidos ──────────────────
+
+def equipo_offline(disp):
+    """True si el ESP32 del dispositivo no consulta hace más de 2 minutos."""
+    if not disp or not disp.get("ultimo_poll"):
+        return True
+    try:
+        return (datetime.now() - datetime.fromisoformat(disp["ultimo_poll"])).total_seconds() > 120
+    except (ValueError, TypeError):
+        return True
+
+def reembolsar_orden_mp(orden):
+    """Devuelve el pago de una orden 'ord_XXX' al cliente final."""
+    mp_id = orden["id"][4:]
+    disp = get_dispositivo(orden["dispositivo_id"])
+    headers = mp_headers(token_de(disp))
+    headers["X-Idempotency-Key"] = str(uuid.uuid4())
+    try:
+        r = requests.post(f"https://api.mercadopago.com/v1/orders/{mp_id}/refund", headers=headers, timeout=10)
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print(f"Error reembolsando {orden['id']}: {e}")
+        return False
+
+def marcar_orden(orden_id, nuevo_estado, solo_si=None):
+    conn = get_db()
+    cur = conn.cursor()
+    if solo_si:
+        cur.execute("UPDATE ordenes SET estado=%s WHERE id=%s AND estado=%s", (nuevo_estado, orden_id, solo_si))
+    else:
+        cur.execute("UPDATE ordenes SET estado=%s WHERE id=%s", (nuevo_estado, orden_id))
+    tomada = cur.rowcount == 1
+    conn.commit()
+    cur.close()
+    conn.close()
+    return tomada
+
+def vigilar_ordenes():
+    """Cada minuto: si una orden pagada lleva más de REEMBOLSO_MINUTOS
+    esperando y el equipo está sin conexión, se devuelve el dinero.
+    Si el equipo está online (solo ocupado, con fila), no se toca."""
+    while True:
+        try:
+            limite = (datetime.now() - timedelta(minutes=REEMBOLSO_MINUTOS)).isoformat()
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM ordenes WHERE estado='pendiente' AND fecha < %s", (limite,))
+            viejas = cur.fetchall()
+            cur.close()
+            conn.close()
+            for o in viejas:
+                disp = get_dispositivo(o["dispositivo_id"])
+                if not equipo_offline(disp):
+                    continue  # el equipo está vivo: es fila de espera, no un corte
+                # transición atómica: solo un proceso la toma
+                if not marcar_orden(o["id"], "vencida", solo_si="pendiente"):
+                    continue
+                if o["id"].startswith("ord_"):
+                    if reembolsar_orden_mp(o):
+                        marcar_orden(o["id"], "reembolsada")
+                        print(f"Orden {o['id']} reembolsada (equipo sin conexión)")
+                    else:
+                        print(f"Orden {o['id']} vencida — REEMBOLSO MANUAL requerido")
+                else:
+                    print(f"Orden {o['id']} vencida (simulada/legacy, sin reembolso)")
+        except Exception as e:
+            print(f"Error en vigilancia de órdenes: {e}")
+        time.sleep(60)
+
+threading.Thread(target=vigilar_ordenes, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
