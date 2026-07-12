@@ -252,10 +252,16 @@ def rearmar_qr(disp):
     if anterior:
         try:
             r = requests.get(f"https://api.mercadopago.com/v1/orders/{anterior}", headers=mp_headers(token_de(disp)), timeout=10)
-            if r.status_code == 200 and r.json().get("status") == "processed":
-                o = r.json()
-                insertar_orden(f"ord_{anterior}", o.get("external_reference", disp["id"]), disp["segundos"])
-                print(f"Pago recuperado por verificación directa: {anterior}")
+            if r.status_code == 200:
+                estado = r.json().get("status")
+                if estado == "processed":
+                    o = r.json()
+                    insertar_orden(f"ord_{anterior}", o.get("external_reference", disp["id"]), disp["segundos"])
+                    print(f"Pago recuperado por verificación directa: {anterior}")
+                elif estado == "created":
+                    # sigue activa sin pagar: cancelarla para que la nueva
+                    # no choque (renovación sin huecos)
+                    cancelar_orden_qr(disp)
         except Exception as e:
             print(f"Error verificando orden anterior de {disp['id']}: {e}")
 
@@ -268,7 +274,7 @@ def rearmar_qr(disp):
         "type": "qr",
         "external_reference": disp["id"],
         "description": titulo,
-        "expiration_time": "PT3H",
+        "expiration_time": "PT30M",
         "total_amount": monto,
         "config": {"qr": {"external_pos_id": disp["external_pos_id"], "mode": "static"}},
         "transactions": {"payments": [{"amount": monto}]},
@@ -300,14 +306,15 @@ def rearmar_qr(disp):
 
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
-    # re-armar el QR del dispositivo si nunca se armó o pasaron más de 2,5 hs
+    # re-armar el QR del dispositivo si nunca se armó o pasaron más de 20 min
+    # (la orden vence a los 30: ventana de riesgo máxima si se corta la luz)
     disp = get_dispositivo(dispositivo_id)
     if disp:
         # registrar que el equipo está vivo (para el reembolso automático)
         actualizar_dispositivo(dispositivo_id, {"ultimo_poll": datetime.now().isoformat()})
         rearme = disp.get("ultimo_rearme")
         try:
-            vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 9000
+            vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 1200
         except (ValueError, TypeError):
             vencido = True
         if vencido:
