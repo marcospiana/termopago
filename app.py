@@ -70,6 +70,8 @@ def init_db():
     # ultimo_poll: última vez que el ESP32 del dispositivo consultó (para
     # detectar equipos sin conexión)
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ultimo_poll TEXT")
+    # monto: importe cobrado en cada orden (para estadísticas)
+    cur.execute("ALTER TABLE ordenes ADD COLUMN IF NOT EXISTS monto REAL")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -214,14 +216,18 @@ def actualizar_dispositivo(disp_id, campos):
     cur.close()
     conn.close()
 
-def insertar_orden(orden_id, dispositivo_id, segundos):
+def insertar_orden(orden_id, dispositivo_id, segundos, monto=None):
     """Inserta una orden. El PK evita duplicados si MP notifica dos veces."""
+    try:
+        monto = float(monto) if monto is not None else None
+    except (ValueError, TypeError):
+        monto = None
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha) VALUES (%s, %s, %s, %s, %s) "
+        "INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha, monto) VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (id) DO NOTHING",
-        (orden_id, dispositivo_id, segundos, "pendiente", datetime.now().isoformat())
+        (orden_id, dispositivo_id, segundos, "pendiente", datetime.now().isoformat(), monto)
     )
     conn.commit()
     cur.close()
@@ -256,7 +262,7 @@ def rearmar_qr(disp):
                 estado = r.json().get("status")
                 if estado == "processed":
                     o = r.json()
-                    insertar_orden(f"ord_{anterior}", o.get("external_reference", disp["id"]), disp["segundos"])
+                    insertar_orden(f"ord_{anterior}", o.get("external_reference", disp["id"]), disp["segundos"], o.get("total_amount"))
                     print(f"Pago recuperado por verificación directa: {anterior}")
                 elif estado == "created":
                     # sigue activa sin pagar: cancelarla para que la nueva
@@ -406,7 +412,7 @@ def webhook():
                 break
         if order.get("status") == "processed":
             dispositivo_id = order.get("external_reference", "termo_001")
-            insertar_orden(f"ord_{order_id}", dispositivo_id, segundos_de(dispositivo_id))
+            insertar_orden(f"ord_{order_id}", dispositivo_id, segundos_de(dispositivo_id), order.get("total_amount"))
             print(f"Pago QR aprobado para {dispositivo_id}")
             disp = get_dispositivo(dispositivo_id)
             if disp:
@@ -424,7 +430,7 @@ def webhook():
         pagos_aprobados = [p for p in order.get("payments", []) if p["status"] == "approved"]
         if pagos_aprobados and order.get("order_status") == "paid":
             dispositivo_id = order.get("external_reference", "termo_001")
-            insertar_orden(f"mo_{order['id']}", dispositivo_id, segundos_de(dispositivo_id))
+            insertar_orden(f"mo_{order['id']}", dispositivo_id, segundos_de(dispositivo_id), order.get("total_amount"))
             print(f"Pago QR (legacy) aprobado para {dispositivo_id}")
         return "ok", 200
 
@@ -435,7 +441,7 @@ def webhook():
         pago = sdk.payment().get(pago_id)["response"]
         if pago.get("status") == "approved":
             dispositivo_id = pago.get("metadata", {}).get("dispositivo_id", "termo_001")
-            insertar_orden(f"pay_{pago_id}", dispositivo_id, segundos_de(dispositivo_id))
+            insertar_orden(f"pay_{pago_id}", dispositivo_id, segundos_de(dispositivo_id), pago.get("transaction_amount"))
             print(f"Pago checkout aprobado: {pago_id}")
         return "ok", 200
 
@@ -758,6 +764,59 @@ def crear_pago():
     result = sdk.preference().create(preference)
     link = result["response"]["init_point"]
     return redirect(link)
+
+# ─── Estadísticas de ventas ──────────────────────────────────────
+
+@app.route("/estadisticas/<clave>")
+def estadisticas(clave):
+    """Ventas por mes y por máquina (solo pagos reales, no simulados)."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT substring(fecha, 1, 7) AS mes,
+               dispositivo_id,
+               COUNT(*) AS ventas,
+               COALESCE(SUM(monto), 0) AS facturado,
+               COUNT(*) FILTER (WHERE estado = 'reembolsada') AS reembolsos
+        FROM ordenes
+        WHERE id LIKE 'ord\\_%' OR id LIKE 'pay\\_%' OR id LIKE 'mo\\_%'
+        GROUP BY 1, 2
+        ORDER BY 1 DESC, 2
+    """)
+    filas = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    cuerpo = ""
+    for f in filas:
+        cuerpo += (f"<tr><td>{f['mes']}</td><td>{f['dispositivo_id']}</td>"
+                   f"<td>{f['ventas']}</td><td>${f['facturado']:,.0f}</td>"
+                   f"<td>{f['reembolsos']}</td></tr>")
+    if not cuerpo:
+        cuerpo = '<tr><td colspan="5">Sin ventas registradas todavía</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - Ventas</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #ccc; padding: 8px 10px; text-align: left; font-size: 15px; }}
+  th {{ background: #009ee3; color: white; }}
+  tr:nth-child(even) {{ background: #f5f5f5; }}
+</style></head><body>
+<h2>📊 Ventas por mes</h2>
+<table>
+<tr><th>Mes</th><th>Máquina</th><th>Ventas</th><th>Facturado</th><th>Reembolsos</th></tr>
+{cuerpo}
+</table>
+<p style="color:#666;font-size:13px">Solo pagos reales (QR y link). Los montos se registran
+desde julio 2026; ventas anteriores cuentan pero pueden mostrar $0.</p>
+</body></html>"""
 
 # ─── Historial ───────────────────────────────────────────────────
 

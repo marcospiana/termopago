@@ -11,6 +11,9 @@ https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE
 VER ULTIMOS PAGOS / ORDENES:
 https://web-production-94bbab.up.railway.app/historial
 
+VENTAS POR MES Y POR MAQUINA:
+https://web-production-94bbab.up.railway.app/estadisticas/TU_CLAVE
+
 DIAGNOSTICO (verifica credenciales de MercadoPago):
 https://web-production-94bbab.up.railway.app/diagnostico/TU_CLAVE
 
@@ -22,6 +25,21 @@ Imagen PNG:
 https://www.mercadopago.com/instore/merchant/qr/1486831/2a4dd50156a34a58b650aa6e8b9947af78a9d610c6074fe3ac053d378037efce.png
 Plantilla PDF con marco de MercadoPago:
 https://www.mercadopago.com/instore/merchant/qr/1486831/template_2a4dd50156a34a58b650aa6e8b9947af78a9d610c6074fe3ac053d378037efce.pdf
+
+PENDIENTES / DECISIONES CON EL CLIENTE:
+- Recargo por credito: el QR no permite bloquear tarjeta de credito,
+  pero se puede publicar el precio con el costo del credito incluido
+  y aplicar descuento automatico para debito/dinero en cuenta
+  (funcion nativa de MP, se muestra como "descuento" en la app).
+  Implementacion lista para agregar al panel /config cuando el cliente decida.
+- Upgrade monedero: el C-10 ECO-2 no acepta credito externo; si el cliente
+  quiere el tiempo de QR en el display Somyc, cambiar a C-10 ASM
+  (entrada billetero) + software Nexus.
+- Firmware "display unificado": LCD propio mostrando tiempo de monedas
+  (leyendo pin 3 del C-10) + tiempo de QR. Pedirselo a Claude al armarlo.
+- OAuth marketplace: listo en el backend, falta cargar MP_CLIENT_ID,
+  MP_CLIENT_SECRET y FEE_PORCENTAJE en Railway + URL de redireccion
+  /oauth_callback en el panel de MP.
 
 DATOS DEL SISTEMA:
 - Backend: https://web-production-94bbab.up.railway.app (Railway)
