@@ -280,7 +280,7 @@ def rearmar_qr(disp):
         "type": "qr",
         "external_reference": disp["id"],
         "description": titulo,
-        "expiration_time": "PT30M",
+        "expiration_time": "PT15M",
         "total_amount": monto,
         "config": {"qr": {"external_pos_id": disp["external_pos_id"], "mode": "static"}},
         "transactions": {"payments": [{"amount": monto}]},
@@ -312,15 +312,15 @@ def rearmar_qr(disp):
 
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
-    # re-armar el QR del dispositivo si nunca se armó o pasaron más de 20 min
-    # (la orden vence a los 30: ventana de riesgo máxima si se corta la luz)
+    # re-armar el QR del dispositivo si nunca se armó o pasaron más de 10 min
+    # (la orden vence a los 15: ventana de riesgo máxima si se corta la luz)
     disp = get_dispositivo(dispositivo_id)
     if disp:
         # registrar que el equipo está vivo (para el reembolso automático)
         actualizar_dispositivo(dispositivo_id, {"ultimo_poll": datetime.now().isoformat()})
         rearme = disp.get("ultimo_rearme")
         try:
-            vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 1200
+            vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 600
         except (ValueError, TypeError):
             vencido = True
         if vencido:
