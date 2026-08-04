@@ -651,8 +651,11 @@ def config_panel(clave):
                 if nuevo_precio <= 0 or nuevos_minutos <= 0:
                     raise ValueError
                 precio_cambio = nuevo_precio != float(disp["precio"])
+                tiempo_cambio = (nuevos_minutos * 60) != int(disp["segundos"])
                 actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_minutos * 60})
-                if precio_cambio:
+                # re-armar el QR si cambió el precio O el tiempo (los minutos
+                # van en la descripción del QR, así queda todo consistente)
+                if precio_cambio or tiempo_cambio:
                     disp_actualizado = get_dispositivo(disp["id"])
                     cancelar_orden_qr(disp)
                     rearmar_qr(disp_actualizado)
