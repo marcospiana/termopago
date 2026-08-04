@@ -739,13 +739,17 @@ def diagnostico(clave):
 
 # ─── Ver sucursales y cajas ──────────────────────────────────────
 
-@app.route("/ver_sucursales")
-def ver_sucursales():
+@app.route("/ver_sucursales/<clave>")
+def ver_sucursales(clave):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
     r = requests.get(f"https://api.mercadopago.com/users/{USER_ID}/stores/search", headers=mp_headers())
     return r.text, r.status_code, {"Content-Type": "application/json"}
 
-@app.route("/ver_cajas")
-def ver_cajas():
+@app.route("/ver_cajas/<clave>")
+def ver_cajas(clave):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
     r = requests.get("https://api.mercadopago.com/pos", headers=mp_headers())
     return r.text, r.status_code, {"Content-Type": "application/json"}
 
