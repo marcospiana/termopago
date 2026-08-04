@@ -1,0 +1,107 @@
+========================================================================
+TERMOPAGO PREMIUM - Especificacion de equipo
+Pantalla Nextion a color (remota) + gabinete con conectores
+========================================================================
+
+OBJETIVO
+Un equipo cerrado, plug-and-play: al cliente le llega una caja sellada
+con conectores rotulados. Enchufa fuente, pantalla y salida a la maquina,
+y funciona. Cero electronica expuesta, cero cables sueltos.
+
+------------------------------------------------------------------------
+ARQUITECTURA
+------------------------------------------------------------------------
+[ GABINETE PRINCIPAL IP65 ]
+  - ESP32 (con antena externa) + rele
+  - Fuente/conversor 12V -> 5V interna
+  - Conector pared ALIMENTACION  (entrada 12V de la maquina)
+  - Conector pared SALIDA RELE    (a la maquina / contactor)
+  - Conector pared PANTALLA        (serie al Nextion, 4 pines)
+  - Antena WiFi SMA a la pared
+
+[ PANTALLA REMOTA ]
+  - Nextion HMI color en su propio bezel impreso
+  - Cable con conector -> se enchufa al gabinete
+  - Se cambia sin abrir el equipo
+
+------------------------------------------------------------------------
+LISTA DE COMPONENTES (BOM)
+------------------------------------------------------------------------
+CEREBRO
+  [ ] ESP32-WROOM-32U (con conector de antena U.FL)
+  [ ] Pigtail U.FL -> SMA hembra pasamuro
+  [ ] Antena WiFi 2.4GHz SMA
+  [ ] Rele 1 canal 10A con optoacoplador  (o placa ESP32+rele)
+
+PANTALLA
+  [ ] Nextion HMI 2.4" o 2.8" (basica o enhanced)
+      - se conecta por serie (UART): 5V, GND, TX, RX
+      - la interfaz se disena en el software Nextion Editor (gratis)
+
+ALIMENTACION
+  [ ] Conversor step-down 12V -> 5V (min 2A, para ESP32 + Nextion)
+  [ ] Fusible + portafusible en la entrada
+  [ ] (opcional) varistor si el rele maneja motor directo
+
+CONECTORES PASAMURO (aviacion, rotulados)
+  [ ] GX12/GX16 hembra para ALIMENTACION (2 pines)
+  [ ] GX16 hembra para SALIDA RELE (2-3 pines)
+  [ ] GX12 hembra 4 pines para PANTALLA (5V, GND, TX, RX)
+
+GABINETE
+  [ ] Caja IP65 policarbonato o aluminio, con prensacables
+  [ ] Bezel impreso 3D para el Nextion (a disenar segun modelo)
+  [ ] Bolsita de silica gel (anti-condensacion)
+
+CABLE DE PANTALLA
+  [ ] Cable 4 hilos con conector macho GX12 en un extremo
+
+HERRAMIENTAS/EXTRA
+  [ ] Adaptador USB-TTL (para cargar el firmware si el USB no programa)
+
+------------------------------------------------------------------------
+CONEXIONADO (resumen)
+------------------------------------------------------------------------
+- Entrada 12V (conector) -> fusible -> conversor 12V/5V + rele
+- Conversor 5V -> ESP32 y -> Nextion (por el conector de pantalla)
+- ESP32 GPIO rele -> IN del rele
+- Rele COM/NO -> conector SALIDA -> maquina/contactor
+- ESP32 UART (TX/RX) -> conector PANTALLA -> Nextion
+- ESP32 U.FL -> pigtail -> antena SMA
+
+------------------------------------------------------------------------
+FIRMWARE - cambios respecto a la version LCD
+------------------------------------------------------------------------
+- El Nextion NO se dibuja como el LCD. La pantalla (fondos, textos,
+  numeros grandes, logo) se disena en Nextion Editor y se carga a la
+  pantalla por microSD o serie.
+- El ESP32 solo manda comandos por serie, ej:
+    numero.val=1800   (setear el contador)
+    texto.txt="Pague y use"   (cambiar un texto)
+- Ventaja: el ESP32 queda liviano, la UI se ve profesional.
+- Se agrega la libreria Nextion (o EasyNextion) y se usa Serial2 del
+  ESP32 para no chocar con el USB de programacion.
+- Pantallas a disenar: reposo (escanee QR / precio), en uso (cuenta
+  regresiva grande), sin wifi, gracias.
+
+------------------------------------------------------------------------
+CONSIDERACIONES
+------------------------------------------------------------------------
+- Sol directo: las Nextion basicas no son de alto brillo. En islas de
+  estacion suele haber techo; si hay sol pleno, evaluar version con
+  mayor brillo o visera impresa.
+- Consumo: el Nextion mas grande tira picos; por eso conversor de 2A.
+- El conector de pantalla lleva 5V: usar 4 pines (5V, GND, TX, RX) y
+  rotularlo para no confundir con el de alimentacion.
+- Mantener el esquema modular: si algo falla (pantalla, fuente), se
+  reemplaza esa parte sin tocar el resto.
+
+------------------------------------------------------------------------
+PROXIMOS PASOS
+------------------------------------------------------------------------
+1. Elegir y comprar: ESP32-U, Nextion (2.4 o 2.8), conversor, conectores
+   GX12/GX16, gabinete IP65.
+2. Pasar medidas del Nextion elegido -> disenar su bezel 3D.
+3. Adaptar el firmware a Nextion (Serial2 + comandos de UI).
+4. Disenar las pantallas en Nextion Editor.
+5. Armar un prototipo y probar el conjunto completo.

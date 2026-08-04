@@ -1,9 +1,34 @@
 TERMOPAGO - ENLACES UTILES
 ==========================
 (Reemplazar TU_CLAVE por el valor de CLAVE_SECRETA de Railway)
+Todas las paginas se ven bien desde el celular. Guardarlas en favoritos.
 
-PANEL DE CONFIGURACION (precio y tiempo de cada maquina):
+=====================================================================
+PANEL DE CONTROL (uso diario) - las 4 paginas principales
+=====================================================================
+
+ESTADO DE EQUIPOS (conectado / intermitente / caido):
+https://web-production-94bbab.up.railway.app/estado/TU_CLAVE
+  - se actualiza sola cada 30 seg
+  - verde = OK, amarillo = senal floja, rojo = caido
+
+HISTORIAL (dia, hora, maquina, monto, estado):
+https://web-production-94bbab.up.railway.app/historial/TU_CLAVE
+  - muestra 40 movimientos; para mas: /historial/TU_CLAVE/100
+
+VENTAS (por dia, por mes, por maquina, con totales):
+https://web-production-94bbab.up.railway.app/estadisticas/TU_CLAVE
+
+CONFIGURACION (precio y tiempo de cada maquina):
 https://web-production-94bbab.up.railway.app/config/TU_CLAVE
+
+LANDING PUBLICA (para clientes, sin clave):
+https://web-production-94bbab.up.railway.app/
+  (el mismo contenido va a ir en termopago.com.ar)
+
+=====================================================================
+HERRAMIENTAS Y MANTENIMIENTO
+=====================================================================
 
 SIMULAR UN PAGO (prueba sin dinero) - formato: .../SEGUNDOS/DISPOSITIVO
 Links completos de cada equipo (cambiar el numero = segundos):
@@ -23,18 +48,11 @@ Links completos de cada equipo (cambiar el numero = segundos):
   Estacion 02 - Soplador:
   https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/30/soplado02
 
-HISTORIAL (tabla con dia, hora, maquina, monto y estado):
-https://web-production-94bbab.up.railway.app/historial/TU_CLAVE
-  - por defecto muestra 40 movimientos; para mas: /historial/TU_CLAVE/100
-
-VENTAS POR MES Y POR MAQUINA:
-https://web-production-94bbab.up.railway.app/estadisticas/TU_CLAVE
-
-DIAGNOSTICO (credenciales, cajas y estado de cada equipo):
+DIAGNOSTICO COMPLETO (credenciales MP, cajas, datos crudos de cada equipo):
 https://web-production-94bbab.up.railway.app/diagnostico/TU_CLAVE
-(el campo ultimo_poll dice cuando consulto por ultima vez cada ESP32)
+  - para ver el estado rapido usar mejor /estado (mas arriba)
 
-RE-ARMAR UN QR A MANO (normalmente es automatico):
+RE-ARMAR UN QR A MANO (si un equipo estuvo caido y el QR se vencio):
 https://web-production-94bbab.up.railway.app/rearmar/TU_CLAVE/DISPOSITIVO
 
 CREAR UNA MAQUINA NUEVA:

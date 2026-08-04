@@ -1,0 +1,57 @@
+GUIA DE USO - ASPIRADORA Y SOPLADOR CON PAGO QR (TermoPago)
+=============================================================
+
+COMO PAGA EL CLIENTE (uso normal)
+---------------------------------
+1. Abrir la app de Mercado Pago en el celular
+2. Tocar "Pagar con QR" y escanear el QR de la maquina que quiere usar
+   (la aspiradora y el soplador tienen QR distintos, estan etiquetados)
+3. Confirmar el pago
+4. La maquina arranca sola en unos segundos
+5. El tiempo restante se ve en la pantalla del equipo
+
+CHEQUEO DIARIO (personal de la estacion)
+----------------------------------------
+- La pantalla debe estar encendida y decir "escanee QR" en cada linea
+- Si dice "WiFi perdido / Reconectando": revisar que el WiFi de la
+  estacion este funcionando (modem/router encendido, internet activo)
+- Si la pantalla esta apagada: revisar que el equipo tenga corriente
+
+PROBLEMAS FRECUENTES Y QUE HACER
+--------------------------------
+EL QR DICE "AVISALE AL CAJERO QUE VAS A PAGAR"
+  La maquina esta sin conexion hace mas de media hora (sin luz o sin
+  WiFi). Revisar corriente y WiFi. Cuando el equipo vuelve a conectar,
+  el QR se arregla SOLO en 1 o 2 minutos. No hay que hacer nada mas.
+
+EL CLIENTE PAGO Y LA MAQUINA NO ARRANCA
+  1. Esperar 10 segundos (es el tiempo normal de arranque)
+  2. Mirar la pantalla: si dice "WiFi perdido", el equipo esta sin
+     conexion. El dinero se le DEVUELVE SOLO al cliente en unos
+     5 minutos, a la misma cuenta de Mercado Pago con la que pago.
+     No hace falta hacer nada ni devolver plata en efectivo.
+  3. Avisar a soporte para revisar la conexion
+
+EL CLIENTE PAGO EN EL QR EQUIVOCADO (ej: pago soplador y queria aspiradora)
+  Arranca la maquina que corresponde al QR escaneado. Puede usarla o
+  esperar que termine y pagar en el QR correcto. Recomendar siempre
+  verificar la etiqueta antes de escanear.
+
+LA MAQUINA ARRANCA SOLA "DE LA NADA"
+  Es normal: es un pago que quedo en espera mientras el equipo estaba
+  sin conexion y se ejecuta al reconectar (solo si paso poco tiempo).
+
+IMPORTANTE - NO HACER
+---------------------
+- NO despegar, tapar ni rayar los carteles con QR (sin QR no hay cobro)
+- NO desenchufar el equipo salvo emergencia; si se desenchufa,
+  al enchufarlo de nuevo todo vuelve solo en 1 o 2 minutos
+- NO cambiar la clave del WiFi de la estacion sin avisar antes a
+  soporte (el equipo quedaria desconectado y las maquinas sin cobrar)
+- Las monedas siguen funcionando igual que siempre, nada cambia
+
+SOPORTE
+-------
+Marcos - TermoPago
+Telefono/WhatsApp: ____________________
+Ante cualquier duda, mandar foto de la pantalla del equipo
