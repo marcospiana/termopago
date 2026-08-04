@@ -1,0 +1,158 @@
+TERMOPAGO - ENLACES UTILES
+==========================
+(Reemplazar TU_CLAVE por el valor de CLAVE_SECRETA de Railway)
+
+PANEL DE CONFIGURACION (precio y tiempo de cada maquina):
+https://web-production-94bbab.up.railway.app/config/TU_CLAVE
+
+SIMULAR UN PAGO (prueba sin dinero) - formato: .../SEGUNDOS/DISPOSITIVO
+Links completos de cada equipo (cambiar el numero = segundos):
+
+  Termo:
+  https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/10/termo_001
+
+  Estacion 01 - Aspiradora:
+  https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/30/aspiradora01
+
+  Estacion 01 - Soplador:
+  https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/30/soplado01
+
+  Estacion 02 - Aspiradora:
+  https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/30/aspiradora02
+
+  Estacion 02 - Soplador:
+  https://web-production-94bbab.up.railway.app/simular_pago/TU_CLAVE/30/soplado02
+
+HISTORIAL (tabla con dia, hora, maquina, monto y estado):
+https://web-production-94bbab.up.railway.app/historial/TU_CLAVE
+  - por defecto muestra 40 movimientos; para mas: /historial/TU_CLAVE/100
+
+VENTAS POR MES Y POR MAQUINA:
+https://web-production-94bbab.up.railway.app/estadisticas/TU_CLAVE
+
+DIAGNOSTICO (credenciales, cajas y estado de cada equipo):
+https://web-production-94bbab.up.railway.app/diagnostico/TU_CLAVE
+(el campo ultimo_poll dice cuando consulto por ultima vez cada ESP32)
+
+RE-ARMAR UN QR A MANO (normalmente es automatico):
+https://web-production-94bbab.up.railway.app/rearmar/TU_CLAVE/DISPOSITIVO
+
+CREAR UNA MAQUINA NUEVA:
+https://web-production-94bbab.up.railway.app/crear_dispositivo/TU_CLAVE/ID/NOMBRE/VARIABLE_TOKEN
+  - ID sin espacios (ej: aspiradora02)
+  - NOMBRE con guiones si tiene espacios (ej: Poste-de-inflado)
+  - VARIABLE_TOKEN: variable de Railway con el token del cliente
+    (omitir para que cobre a la cuenta propia)
+  - Devuelve los links del QR para imprimir
+  - El ID debe coincidir con el firmware del ESP32
+
+OAUTH MARKETPLACE (cuando se active - requiere MP_CLIENT_ID y
+MP_CLIENT_SECRET en Railway):
+  Generar link para el cliente: .../conectar_cliente/TU_CLAVE/ALIAS/NOMBRE
+  Ver clientes conectados:      .../ver_clientes/TU_CLAVE
+
+=====================================================================
+MAQUINAS ACTIVAS
+=====================================================================
+
+TERMO (cuenta propia)
+  id: termo_001 | caja MP: 1486831 "QRtermo" (external_id "default")
+  QR: https://www.mercadopago.com/instore/merchant/qr/1486831/2a4dd50156a34a58b650aa6e8b9947af78a9d610c6074fe3ac053d378037efce.png
+  (equipo sin ESP32 por ahora - se reutilizo para la estacion)
+
+ESTACION 01 (cuenta del cliente, variable MP_TOKEN_ASPIRADORA)
+  Firmware: firmware/nodemcu32_aspiradora_soplado/
+
+  Aspiradora 01 | caja MP 135130132 | rele GPIO 25
+    QR: https://www.mercadopago.com/instore/merchant/qr/135130132/70942efebab446f88703317a24fd5e0de822946404c549fb8d83cdead89c5754.png
+    Cartel: carteles/cartel_aspiradora01_15x25.pdf | Imagen: qr/aspiradora01.png
+  Soplador 01 | caja MP 135136662 | rele GPIO 26
+    QR: https://www.mercadopago.com/instore/merchant/qr/135136662/d9106805d2d748eb91e37dd4fc91123dbc0dbfdcb0054019a10cda1f0552b3b6.png
+    Cartel: carteles/cartel_soplado01_15x25.pdf | Imagen: qr/soplado01.png
+
+ESTACION 02 (mismo cliente, misma variable MP_TOKEN_ASPIRADORA)
+  Firmware: firmware/nodemcu32_estacion02/
+
+  Aspiradora 02 | caja MP 135700091 | rele GPIO 25
+    QR: https://www.mercadopago.com/instore/merchant/qr/135700091/30876b901a7749d1a49daddd55dcc9b2e836301f9d8642b790728e48204db9cc.png
+    Cartel: carteles/cartel_aspiradora02_15x25.pdf | Imagen: qr/aspiradora02.png
+  Soplador 02 | caja MP 135700133 | rele GPIO 26
+    QR: https://www.mercadopago.com/instore/merchant/qr/135700133/99fb75a9bf194438a36af8429fba2273f17fd0aa245b4a158d87e6e367a87a10.png
+    Cartel: carteles/cartel_soplado02_15x25.pdf | Imagen: qr/soplado02.png
+
+=====================================================================
+MAPA DE ARCHIVOS - donde esta cada cosa
+=====================================================================
+
+RAIZ  (NO mover - Railway deploya de aca):
+  app.py             backend completo
+  Procfile           config de arranque de Railway
+  requirements.txt   librerias de Python
+  .gitignore
+
+firmware/   (codigo de los ESP32 - abrir el .ino con Arduino IDE)
+  termopago_esp32_v3/            -> TERMO (1 rele + LCD)
+  nodemcu32_aspiradora_soplado/  -> ESTACION 01 (aspiradora01 / soplado01)
+  nodemcu32_estacion02/          -> ESTACION 02 (aspiradora02 / soplado02)
+
+carteles/   (PDF listos para imprimir - hay dos tamanos de cada uno)
+  cartel_aspiradora01.pdf        A4
+  cartel_aspiradora01_15x25.pdf  15x25 cm  <- el que se imprime
+  cartel_soplado01.pdf / _15x25.pdf
+  cartel_aspiradora02.pdf / _15x25.pdf
+  cartel_soplado02.pdf / _15x25.pdf
+
+qr/   (imagen del QR de cada maquina + visor html)
+  aspiradora01.png / .html
+  soplado01.png / .html
+  aspiradora02.png / .html
+  soplado02.png / .html
+
+carcasa_lcd_16x2/   (disenos 3D del gabinete del display)
+  bezel_mini.stl       version A: corte chico, LCD desde adentro
+  bezel_frontal.stl + tapa_trasera.stl    version B: divisor
+  bezel_compacto.stl + tapa_compacta.stl  version C: compacta
+  LEEME.txt            medidas, tornilleria e instrucciones
+
+docs/   (documentacion)
+  enlaces_termopago.txt        <- ESTE archivo (links y datos)
+  guia_cliente_estacion.txt    guia para el personal de la estacion
+  termopago_premium_spec.txt   plan del equipo premium (Nextion, etc.)
+  TermoPago_Instrucciones.docx / _Resumen_Tecnico.docx   manuales
+
+_viejo/   (obsoletos - se pueden borrar cuando quieras)
+
+=====================================================================
+COMO FUNCIONA (resumen)
+=====================================================================
+- El QR de cada maquina siempre tiene una orden cargada que vence a los
+  30 minutos; el backend la renueva cada 20 (disparado por el polling
+  del ESP32). Equipo apagado = QR deja de cobrar en max 30 min.
+- Pago aprobado -> webhook -> orden en la base -> el ESP32 la toma en
+  su proximo polling (3 seg) y activa el rele.
+- Si el equipo esta sin conexion y alguien paga, a los ~5 minutos se
+  le devuelve el dinero automaticamente (estado "reembolsada").
+- Si se corta la luz a mitad de un servicio, al volver el equipo retoma
+  con el tiempo restante.
+- Monto minimo de MP para ordenes QR: usar $50 o mas.
+
+PENDIENTES / DECISIONES CON EL CLIENTE:
+- Recargo por credito: el QR no permite bloquear tarjeta de credito,
+  pero se puede publicar el precio con el costo del credito incluido
+  y aplicar descuento automatico para debito/dinero en cuenta.
+  Implementacion lista para agregar cuando el cliente decida.
+- Upgrade monedero: el C-10 ECO-2 no acepta credito externo; si el
+  cliente quiere el tiempo de QR en el display Somyc, cambiar a
+  C-10 ASM (entrada billetero) + software Nexus.
+- Estadisticas para el cliente: pagina propia con solo sus maquinas.
+- OAuth marketplace: backend listo, falta cargar MP_CLIENT_ID,
+  MP_CLIENT_SECRET y FEE_PORCENTAJE en Railway + URL de redireccion
+  /oauth_callback en el panel de MP.
+
+DATOS DEL SISTEMA:
+- Backend: https://web-production-94bbab.up.railway.app (Railway, servicio "QR termo")
+- Codigo: https://github.com/marcospiana/termopago (repo publico)
+- Base de datos: PostgreSQL en Railway
+- User ID MP propio: 178328412
+- Variables en Railway: MP_ACCESS_TOKEN (propio), MP_TOKEN_ASPIRADORA
+  (cliente estacion), CLAVE_SECRETA, PRECIO, DATABASE_URL

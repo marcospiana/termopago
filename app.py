@@ -876,9 +876,11 @@ anteriores cuentan en cantidad pero pueden figurar en $0.</p>
 
 # ─── Historial ───────────────────────────────────────────────────
 
-@app.route("/historial")
-@app.route("/historial/<int:cuantos>")
-def historial(cuantos=40):
+@app.route("/historial/<clave>")
+@app.route("/historial/<clave>/<int:cuantos>")
+def historial(clave, cuantos=40):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM ordenes ORDER BY fecha DESC LIMIT %s", (min(cuantos, 300),))
