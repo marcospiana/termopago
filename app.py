@@ -906,7 +906,9 @@ def historial(cuantos=40):
         f = o["fecha"] or ""
         dia = f[8:10] + "/" + f[5:7] if len(f) >= 10 else f      # DD/MM
         hora = f[11:16] if len(f) >= 16 else ""                   # HH:MM
-        maq = nombres.get(o["dispositivo_id"], o["dispositivo_id"])
+        did = o["dispositivo_id"]
+        maq = (f'{nombres.get(did, did)} '
+               f'<span style="color:#888;font-size:12px">{did}</span>')
         # tipo: pago real (QR/link) o prueba simulada
         oid = o["id"] or ""
         real = oid.startswith(("ord_", "pay_", "mo_"))
