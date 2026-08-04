@@ -772,53 +772,100 @@ def crear_pago():
 
 @app.route("/estadisticas/<clave>")
 def estadisticas(clave):
-    """Ventas por mes y por máquina (solo pagos reales, no simulados)."""
+    """Resumen de ventas: totales, por día, por mes y por máquina.
+    Solo cuenta pagos reales (QR y link), no las simulaciones."""
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT substring(fecha, 1, 7) AS mes,
-               dispositivo_id,
-               COUNT(*) AS ventas,
-               COALESCE(SUM(monto), 0) AS facturado,
-               COUNT(*) FILTER (WHERE estado = 'reembolsada') AS reembolsos
+    cur.execute(r"""
+        SELECT dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado
         FROM ordenes
-        WHERE id LIKE 'ord\\_%' OR id LIKE 'pay\\_%' OR id LIKE 'mo\\_%'
-        GROUP BY 1, 2
-        ORDER BY 1 DESC, 2
+        WHERE id LIKE 'ord\_%' OR id LIKE 'pay\_%' OR id LIKE 'mo\_%'
     """)
-    filas = cur.fetchall()
+    rows = cur.fetchall()
     cur.close()
     conn.close()
 
-    cuerpo = ""
-    for f in filas:
-        cuerpo += (f"<tr><td>{f['mes']}</td><td>{f['dispositivo_id']}</td>"
-                   f"<td>{f['ventas']}</td><td>${f['facturado']:,.0f}</td>"
-                   f"<td>{f['reembolsos']}</td></tr>")
-    if not cuerpo:
-        cuerpo = '<tr><td colspan="5">Sin ventas registradas todavía</td></tr>'
+    # nombres lindos de cada máquina
+    nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
+
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    mes_actual = datetime.now().strftime("%Y-%m")
+
+    def nuevo(): return {"ventas": 0, "monto": 0.0, "reemb": 0}
+    por_dia, por_mes, por_maq = {}, {}, {}
+    tot_hoy, tot_mes, tot_all = nuevo(), nuevo(), nuevo()
+
+    for r in rows:
+        dia = (r["fecha"] or "")[:10]
+        mes = (r["fecha"] or "")[:7]
+        m = float(r["monto"] or 0)
+        reemb = 1 if r["estado"] == "reembolsada" else 0
+        for destino in (por_dia.setdefault(dia, nuevo()),
+                        por_mes.setdefault(mes, nuevo()),
+                        por_maq.setdefault(r["dispositivo_id"], nuevo()),
+                        tot_all):
+            destino["ventas"] += 1; destino["monto"] += m; destino["reemb"] += reemb
+        if dia == hoy:
+            tot_hoy["ventas"] += 1; tot_hoy["monto"] += m; tot_hoy["reemb"] += reemb
+        if mes == mes_actual:
+            tot_mes["ventas"] += 1; tot_mes["monto"] += m; tot_mes["reemb"] += reemb
+
+    def tarjeta(titulo, d):
+        return (f'<div class="card"><div class="ct">{titulo}</div>'
+                f'<div class="cv">${d["monto"]:,.0f}</div>'
+                f'<div class="cs">{d["ventas"]} ventas'
+                + (f' · {d["reemb"]} reemb.' if d["reemb"] else '') + '</div></div>')
+
+    def tabla(titulo, datos, es_maquina=False, limite=None):
+        claves = sorted(datos.keys(), reverse=True)
+        if limite: claves = claves[:limite]
+        filas = ""
+        for k in claves:
+            d = datos[k]
+            etiqueta = f"{nombres.get(k, k)} ({k})" if es_maquina else k
+            filas += (f"<tr><td>{etiqueta}</td><td>{d['ventas']}</td>"
+                      f"<td>${d['monto']:,.0f}</td><td>{d['reemb'] or ''}</td></tr>")
+        if not filas:
+            filas = '<tr><td colspan="4">Sin datos</td></tr>'
+        col1 = "Máquina" if es_maquina else titulo.split()[-1]
+        return (f'<h3>{titulo}</h3><table>'
+                f'<tr><th>{col1}</th><th>Ventas</th><th>Facturado</th><th>Reemb.</th></tr>'
+                f'{filas}</table>')
 
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TermoPago - Ventas</title>
 <style>
-  body {{ font-family: sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; }}
+  body {{ font-family: sans-serif; max-width: 640px; margin: 24px auto; padding: 0 14px; color:#222; }}
+  h2 {{ margin-bottom: 4px; }}
+  h3 {{ margin: 26px 0 8px; color:#1b4f72; }}
+  .cards {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }}
+  .card {{ flex:1; min-width:140px; background:#009ee3; color:white; border-radius:10px; padding:12px 14px; }}
+  .ct {{ font-size:13px; opacity:.9; }}
+  .cv {{ font-size:26px; font-weight:bold; margin:2px 0; }}
+  .cs {{ font-size:12px; opacity:.9; }}
   table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ border: 1px solid #ccc; padding: 8px 10px; text-align: left; font-size: 15px; }}
-  th {{ background: #009ee3; color: white; }}
-  tr:nth-child(even) {{ background: #f5f5f5; }}
+  th, td {{ border: 1px solid #ddd; padding: 7px 10px; text-align: left; font-size: 14px; }}
+  th {{ background: #eaf4fb; color:#1b4f72; }}
+  tr:nth-child(even) td {{ background: #f7f9fb; }}
+  .nota {{ color:#888; font-size:12px; margin-top:20px; }}
 </style></head><body>
-<h2>📊 Ventas por mes</h2>
-<table>
-<tr><th>Mes</th><th>Máquina</th><th>Ventas</th><th>Facturado</th><th>Reembolsos</th></tr>
-{cuerpo}
-</table>
-<p style="color:#666;font-size:13px">Solo pagos reales (QR y link). Los montos se registran
-desde julio 2026; ventas anteriores cuentan pero pueden mostrar $0.</p>
+<h2>📊 TermoPago — Ventas</h2>
+<div class="cards">
+  {tarjeta("Hoy", tot_hoy)}
+  {tarjeta("Este mes", tot_mes)}
+  {tarjeta("Histórico", tot_all)}
+</div>
+{tabla("Por día (últimos 30)", por_dia, limite=30)}
+{tabla("Por mes", por_mes)}
+{tabla("Por máquina", por_maq, es_maquina=True)}
+<p class="nota">Solo pagos reales (QR y link), no simulaciones. Fechas y horas
+en horario del servidor. Los montos se registran desde julio 2026; ventas
+anteriores cuentan en cantidad pero pueden figurar en $0.</p>
 </body></html>"""
 
 # ─── Historial ───────────────────────────────────────────────────
