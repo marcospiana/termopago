@@ -316,6 +316,19 @@ def rearmar_qr(disp):
 
 # ─── Rutas del ESP32 ────────────────────────────────────────────
 
+# ─── Landing pública (termopago.com.ar) ──────────────────────────
+
+@app.route("/")
+def landing():
+    ruta = os.path.join(os.path.dirname(__file__), "web", "index.html")
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "TermoPago", 200
+
+# ─── Rutas del ESP32 ─────────────────────────────────────────────
+
 @app.route("/orden/<dispositivo_id>")
 def consultar_orden(dispositivo_id):
     # re-armar el QR del dispositivo si nunca se armó o pasaron más de 10 min

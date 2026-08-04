@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago — Cobrá con QR en tus máquinas de autoservicio</title>
+<meta name="description" content="Sumá pago con QR y MercadoPago a tus aspiradoras, sopladores, termos y lavaderos. Sin cambiar tu monedero. Más ventas, control desde el celular.">
+<style>
+  :root{
+    --azul:#0b3d91; --azul2:#0f52ba; --cyan:#00b4d8; --cyan2:#48cae4;
+    --tinta:#0e1b2c; --gris:#5a6b7b; --claro:#f4f8fb; --blanco:#fff;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:var(--tinta);line-height:1.6;background:var(--blanco)}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 22px}
+  a{text-decoration:none;color:inherit}
+
+  /* NAV */
+  nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border-bottom:1px solid #e7eef4}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:20px;color:var(--azul)}
+  .logo .dot{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--azul),var(--cyan));display:grid;place-items:center;color:#fff;font-size:16px}
+  .nav-links{display:flex;gap:26px;font-size:15px;color:var(--gris)}
+  .nav-links a:hover{color:var(--azul)}
+  .btn{display:inline-block;background:linear-gradient(135deg,var(--azul),var(--azul2));color:#fff;padding:12px 22px;border-radius:30px;font-weight:600;font-size:15px;transition:transform .15s,box-shadow .15s;box-shadow:0 6px 18px rgba(11,61,145,.25)}
+  .btn:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(11,61,145,.35)}
+  .btn.wa{background:linear-gradient(135deg,#25d366,#1da851);box-shadow:0 6px 18px rgba(37,211,102,.3)}
+  @media(max-width:760px){.nav-links{display:none}}
+
+  /* HERO */
+  .hero{background:linear-gradient(160deg,#0b3d91 0%,#0f52ba 55%,#00b4d8 130%);color:#fff;padding:70px 0 90px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;right:-120px;top:-120px;width:420px;height:420px;background:radial-gradient(circle,rgba(255,255,255,.14),transparent 70%);border-radius:50%}
+  .hero .wrap{display:grid;grid-template-columns:1.1fr .9fr;gap:40px;align-items:center;position:relative;z-index:2}
+  .hero h1{font-size:44px;line-height:1.15;font-weight:800;letter-spacing:-.5px}
+  .hero h1 span{color:#9be7ff}
+  .hero p.sub{font-size:19px;margin-top:18px;color:#dce9f7;max-width:520px}
+  .hero .cta{margin-top:30px;display:flex;gap:14px;flex-wrap:wrap}
+  .badge{display:inline-block;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);padding:6px 14px;border-radius:20px;font-size:13px;margin-bottom:18px}
+  /* mock celular */
+  .phone{justify-self:center;width:230px;height:460px;background:#0e1b2c;border-radius:34px;padding:12px;box-shadow:0 30px 60px rgba(0,0,0,.35);border:2px solid rgba(255,255,255,.15)}
+  .screen{background:#fff;border-radius:24px;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--tinta);padding:20px;text-align:center}
+  .qr{width:130px;height:130px;border-radius:14px;background:
+      repeating-linear-gradient(90deg,#0e1b2c 0 8px,#fff 8px 16px),
+      repeating-linear-gradient(0deg,rgba(14,27,44,.5) 0 8px,transparent 8px 16px);
+      background-blend-mode:multiply;border:6px solid #0e1b2c}
+  .screen .t{font-weight:700;color:var(--azul)}
+  .screen .m{font-size:13px;color:var(--gris)}
+  @media(max-width:760px){.hero .wrap{grid-template-columns:1fr;text-align:center}.hero h1{font-size:33px}.hero p.sub{margin-left:auto;margin-right:auto}.hero .cta{justify-content:center}.phone{margin-top:20px}}
+
+  /* SECCIONES */
+  section{padding:72px 0}
+  .titulo{text-align:center;max-width:640px;margin:0 auto 46px}
+  .titulo h2{font-size:32px;font-weight:800;color:var(--azul)}
+  .titulo p{color:var(--gris);font-size:17px;margin-top:10px}
+  .kicker{color:var(--cyan);font-weight:700;letter-spacing:1px;font-size:13px;text-transform:uppercase}
+
+  /* PASOS */
+  .pasos{display:grid;grid-template-columns:repeat(3,1fr);gap:26px}
+  .paso{background:var(--claro);border-radius:18px;padding:30px 24px;text-align:center;border:1px solid #e7eef4}
+  .paso .num{width:52px;height:52px;margin:0 auto 16px;border-radius:50%;background:linear-gradient(135deg,var(--azul),var(--cyan));color:#fff;display:grid;place-items:center;font-size:24px;font-weight:800}
+  .paso h3{font-size:19px;margin-bottom:8px}
+  .paso p{color:var(--gris);font-size:15px}
+
+  /* BENEFICIOS */
+  .benef{background:var(--claro)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+  .card{background:#fff;border-radius:16px;padding:26px;border:1px solid #e7eef4;transition:transform .15s,box-shadow .15s}
+  .card:hover{transform:translateY(-4px);box-shadow:0 14px 30px rgba(11,61,145,.1)}
+  .card .ic{font-size:30px;margin-bottom:12px}
+  .card h3{font-size:18px;margin-bottom:6px;color:var(--azul)}
+  .card p{color:var(--gris);font-size:15px}
+
+  /* MAQUINAS */
+  .maqs{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;margin-top:10px}
+  .chip{background:#fff;border:1.5px solid var(--cyan2);color:var(--azul);padding:12px 22px;border-radius:30px;font-weight:600;font-size:16px}
+
+  /* CONFIANZA */
+  .conf{background:linear-gradient(135deg,#0b3d91,#0f52ba);color:#fff;text-align:center}
+  .conf h2{font-size:30px;font-weight:800}
+  .conf p{color:#dce9f7;font-size:18px;max-width:620px;margin:14px auto 0}
+  .conf .nums{display:flex;gap:50px;justify-content:center;margin-top:40px;flex-wrap:wrap}
+  .conf .n b{font-size:40px;display:block;font-weight:800;color:#9be7ff}
+  .conf .n span{color:#cfe0f2;font-size:15px}
+
+  /* CTA FINAL */
+  .final{text-align:center}
+  .final h2{font-size:34px;font-weight:800;color:var(--azul)}
+  .final p{color:var(--gris);font-size:18px;margin:12px auto 28px;max-width:560px}
+
+  /* FOOTER */
+  footer{background:var(--tinta);color:#aebfd0;padding:44px 0;font-size:15px}
+  footer .wrap{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+  footer .logo{color:#fff}
+  footer a:hover{color:#fff}
+  .foot-links{display:flex;gap:22px;flex-wrap:wrap}
+
+  @media(max-width:760px){
+    .pasos,.grid{grid-template-columns:1fr}
+    .titulo h2,.final h2,.conf h2{font-size:26px}
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav><div class="wrap">
+  <a class="logo" href="#"><span class="dot">⚡</span> TermoPago</a>
+  <div class="nav-links">
+    <a href="#como">Cómo funciona</a>
+    <a href="#beneficios">Beneficios</a>
+    <a href="#maquinas">Para qué sirve</a>
+    <a href="#contacto">Contacto</a>
+  </div>
+  <a class="btn" href="#contacto">Quiero sumarlo</a>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero"><div class="wrap">
+  <div>
+    <span class="badge">🇦🇷 Autoservicio · Pagos con QR</span>
+    <h1>Cobrá con <span>QR y MercadoPago</span> en tus máquinas de autoservicio</h1>
+    <p class="sub">Sumá el pago digital a tus aspiradoras, sopladores, termos y lavaderos.
+    Sin cambiar tu monedero, sin perder los clientes que pagan con fichas. Más ventas, control total desde tu celular.</p>
+    <div class="cta">
+      <a class="btn wa" href="https://wa.me/549XXXXXXXXXX?text=Hola!%20Quiero%20info%20de%20TermoPago" target="_blank">💬 Escribinos por WhatsApp</a>
+      <a class="btn" href="#como" style="background:rgba(255,255,255,.15);box-shadow:none">Ver cómo funciona</a>
+    </div>
+  </div>
+  <div class="phone"><div class="screen">
+    <div class="t">Aspiradora</div>
+    <div class="qr"></div>
+    <div class="m">Escaneá con Mercado Pago<br>o tu billetera virtual</div>
+  </div></div>
+</div></header>
+
+<!-- COMO FUNCIONA -->
+<section id="como">
+  <div class="titulo">
+    <div class="kicker">Simple para todos</div>
+    <h2>Cómo funciona</h2>
+    <p>Tu cliente paga en 10 segundos con el celular. La máquina arranca sola.</p>
+  </div>
+  <div class="wrap pasos">
+    <div class="paso"><div class="num">1</div><h3>Escanea el QR</h3><p>El cliente abre Mercado Pago o su billetera y escanea el código pegado en la máquina.</p></div>
+    <div class="paso"><div class="num">2</div><h3>Paga desde el celular</h3><p>Confirma el pago con dinero en cuenta, débito, crédito, MODO, Cuenta DNI y más.</p></div>
+    <div class="paso"><div class="num">3</div><h3>La máquina arranca</h3><p>En segundos el equipo se enciende por el tiempo pagado. Sin fichas, sin monedas.</p></div>
+  </div>
+</section>
+
+<!-- BENEFICIOS -->
+<section id="beneficios" class="benef">
+  <div class="titulo">
+    <div class="kicker">Para vos, el dueño</div>
+    <h2>Por qué te conviene</h2>
+    <p>No reemplaza tu monedero: le suma un medio de pago que hoy estás perdiendo.</p>
+  </div>
+  <div class="wrap grid">
+    <div class="card"><div class="ic">📈</div><h3>Más ventas</h3><p>El que no anda con monedas hoy no usa tu máquina. Con QR, sí. Es plata nueva.</p></div>
+    <div class="card"><div class="ic">📱</div><h3>Control desde el celular</h3><p>Cambiá el precio y el tiempo de cada máquina en 10 segundos, desde donde estés.</p></div>
+    <div class="card"><div class="ic">📊</div><h3>Reportes de facturación</h3><p>Mirá cuánto factura cada máquina por día y por mes, sin ir a contar monedas.</p></div>
+    <div class="card"><div class="ic">🪙</div><h3>Convive con las fichas</h3><p>Tus clientes de siempre siguen pagando con monedas. Nada cambia para ellos.</p></div>
+    <div class="card"><div class="ic">🛡️</div><h3>El dinero es tuyo</h3><p>Los pagos entran directo a tu cuenta de Mercado Pago. Nosotros no tocamos la plata.</p></div>
+    <div class="card"><div class="ic">🔧</div><h3>Instalación simple</h3><p>Se conecta a tu máquina sin obra. Te lo dejamos funcionando y listo.</p></div>
+  </div>
+</section>
+
+<!-- MAQUINAS -->
+<section id="maquinas">
+  <div class="titulo">
+    <div class="kicker">Versátil</div>
+    <h2>Para qué máquinas sirve</h2>
+    <p>Cualquier equipo que se active por tiempo o por pulso.</p>
+  </div>
+  <div class="wrap maqs">
+    <span class="chip">💨 Aspiradoras</span>
+    <span class="chip">🌀 Sopladores</span>
+    <span class="chip">💧 Termos de agua</span>
+    <span class="chip">🛞 Infladores</span>
+    <span class="chip">🚿 Lavaderos</span>
+    <span class="chip">⏱️ y más…</span>
+  </div>
+</section>
+
+<!-- CONFIANZA -->
+<section class="conf">
+  <div class="wrap">
+    <h2>Pagos seguros, procesados por Mercado Pago</h2>
+    <p>La plata va directo a tu cuenta. Si un equipo se queda sin conexión, el sistema le devuelve el dinero al cliente automáticamente. Nadie pierde.</p>
+    <div class="nums">
+      <div class="n"><b>10s</b><span>tarda un pago</span></div>
+      <div class="n"><b>24/7</b><span>funcionando solo</span></div>
+      <div class="n"><b>0</b><span>obra en tu máquina</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA FINAL -->
+<section id="contacto" class="final">
+  <div class="wrap">
+    <h2>¿Listo para sumar el pago con QR?</h2>
+    <p>Escribinos y coordinamos una demo en tu negocio. Sin compromiso.</p>
+    <a class="btn wa" href="https://wa.me/549XXXXXXXXXX?text=Hola!%20Quiero%20info%20de%20TermoPago" target="_blank" style="font-size:17px;padding:15px 30px">💬 Contactar por WhatsApp</a>
+    <p style="margin-top:20px;font-size:15px">o escribinos a <a href="mailto:contacto@termopago.com.ar" style="color:var(--azul);font-weight:600">contacto@termopago.com.ar</a></p>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer><div class="wrap">
+  <a class="logo" href="#"><span class="dot">⚡</span> TermoPago</a>
+  <div class="foot-links">
+    <a href="#como">Cómo funciona</a>
+    <a href="#beneficios">Beneficios</a>
+    <a href="#contacto">Contacto</a>
+  </div>
+  <div>© 2026 TermoPago · Concordia, Entre Ríos 🇦🇷</div>
+</div></footer>
+
+</body>
+</html>
