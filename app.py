@@ -877,14 +877,74 @@ anteriores cuentan en cantidad pero pueden figurar en $0.</p>
 # ─── Historial ───────────────────────────────────────────────────
 
 @app.route("/historial")
-def historial():
+@app.route("/historial/<int:cuantos>")
+def historial(cuantos=40):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM ordenes ORDER BY fecha DESC LIMIT 20")
+    cur.execute("SELECT * FROM ordenes ORDER BY fecha DESC LIMIT %s", (min(cuantos, 300),))
     ordenes = cur.fetchall()
     cur.close()
     conn.close()
-    return jsonify([dict(o) for o in ordenes])
+
+    # Respuesta JSON si se pide (?json=1)
+    if request.args.get("json"):
+        return jsonify([dict(o) for o in ordenes])
+
+    nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
+
+    # estado -> (texto legible, color de fondo)
+    ESTADOS = {
+        "pendiente":   ("Pagado (en espera)", "#fff8e1"),
+        "ejecutando":  ("En uso",             "#e3f2fd"),
+        "completada":  ("Completado",         "#e8f5e9"),
+        "reembolsada": ("REEMBOLSADO",        "#ffe0e0"),
+        "vencida":     ("Sin atender",        "#f0f0f0"),
+    }
+
+    filas = ""
+    for o in ordenes:
+        f = o["fecha"] or ""
+        dia = f[8:10] + "/" + f[5:7] if len(f) >= 10 else f      # DD/MM
+        hora = f[11:16] if len(f) >= 16 else ""                   # HH:MM
+        maq = nombres.get(o["dispositivo_id"], o["dispositivo_id"])
+        # tipo: pago real (QR/link) o prueba simulada
+        oid = o["id"] or ""
+        real = oid.startswith(("ord_", "pay_", "mo_"))
+        if o.get("monto"):
+            monto = f"${float(o['monto']):,.0f}"
+        elif real:
+            monto = "—"
+        else:
+            monto = "<span style='color:#aaa'>prueba</span>"
+        texto, color = ESTADOS.get(o["estado"], (o["estado"], "#fff"))
+        minutos = f"{(o['segundos'] or 0)//60}m" if (o['segundos'] or 0) >= 60 else f"{o['segundos']}s"
+        filas += (f'<tr style="background:{color}">'
+                  f'<td>{dia}</td><td><b>{hora}</b></td><td>{maq}</td>'
+                  f'<td style="text-align:right">{monto}</td>'
+                  f'<td>{texto}</td><td style="text-align:center;color:#888">{minutos}</td></tr>')
+    if not filas:
+        filas = '<tr><td colspan="6">Sin movimientos todavía</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - Historial</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 680px; margin: 24px auto; padding: 0 12px; color:#222; }}
+  h2 {{ margin-bottom: 2px; }}
+  .sub {{ color:#888; font-size:13px; margin-bottom:14px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 7px 9px; font-size: 14px; }}
+  th {{ background: #009ee3; color:white; text-align:left; position:sticky; top:0; }}
+</style></head><body>
+<h2>🧾 TermoPago — Historial</h2>
+<div class="sub">Últimos {len(ordenes)} movimientos · hora de Argentina ·
+"prueba" = simulación (no es dinero real)</div>
+<table>
+<tr><th>Día</th><th>Hora</th><th>Máquina</th><th>Monto</th><th>Estado</th><th>Tiempo</th></tr>
+{filas}
+</table>
+</body></html>"""
 
 # ─── Reembolso automático de pagos no atendidos ──────────────────
 
