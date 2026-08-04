@@ -721,6 +721,65 @@ def config_panel(clave):
 
 # ─── Diagnóstico de credenciales y QR ────────────────────────────
 
+@app.route("/estado/<clave>")
+def estado(clave):
+    """Página simple: qué equipos están conectados y cuándo fue su último
+    contacto. Verde = conectado, rojo = caído."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    ahora = ahora_ar()
+    filas = ""
+    for d in get_dispositivos():
+        up = d.get("ultimo_poll")
+        try:
+            seg = (ahora - datetime.fromisoformat(up)).total_seconds() if up else None
+        except (ValueError, TypeError):
+            seg = None
+
+        if seg is None:
+            color, txt, hace = "#9e9e9e", "Nunca conectó", "—"
+        elif seg < 90:
+            color, txt = "#2e7d32", "🟢 Conectado"
+        elif seg < 600:
+            color, txt = "#f9a825", "🟡 Intermitente"
+        else:
+            color, txt = "#c62828", "🔴 Caído"
+
+        if seg is not None:
+            if seg < 60:      hace = f"hace {int(seg)} seg"
+            elif seg < 3600:  hace = f"hace {int(seg//60)} min"
+            elif seg < 86400: hace = f"hace {int(seg//3600)} h"
+            else:             hace = f"hace {int(seg//86400)} días"
+
+        hora = (up or "")[11:16]
+        filas += (f'<tr>'
+                  f'<td><b>{d["nombre"]}</b><br><span style="color:#888;font-size:12px">{d["id"]}</span></td>'
+                  f'<td style="color:{color};font-weight:600">{txt}</td>'
+                  f'<td>{hace}<br><span style="color:#aaa;font-size:12px">{hora}</span></td></tr>')
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>TermoPago - Estado de equipos</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 560px; margin: 24px auto; padding: 0 14px; color:#222; }}
+  h2 {{ margin-bottom: 2px; }}
+  .sub {{ color:#888; font-size:13px; margin-bottom:16px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 10px; font-size: 15px; text-align:left; }}
+  th {{ background: #009ee3; color:white; }}
+</style></head><body>
+<h2>📡 Estado de equipos</h2>
+<div class="sub">Se actualiza solo cada 30 seg · hora de Argentina<br>
+🟢 conectado (&lt;90s) · 🟡 intermitente · 🔴 caído (&gt;10min)</div>
+<table>
+<tr><th>Máquina</th><th>Estado</th><th>Último contacto</th></tr>
+{filas}
+</table>
+</body></html>"""
+
 @app.route("/diagnostico/<clave>")
 def diagnostico(clave):
     if clave != CLAVE_SECRETA:
