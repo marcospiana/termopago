@@ -7,7 +7,13 @@ import uuid
 import requests
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# Hora de Argentina (UTC-3), como datetime "naive" para guardar/comparar
+# fechas de forma consistente en todo el sistema.
+AR_TZ = timezone(timedelta(hours=-3))
+def ahora_ar():
+    return datetime.now(AR_TZ).replace(tzinfo=None)
 
 app = Flask(__name__)
 
@@ -140,7 +146,7 @@ def token_cliente(alias):
         vence = datetime.fromisoformat(cli["vence"]) if cli.get("vence") else None
     except (ValueError, TypeError):
         vence = None
-    if vence and (vence - datetime.now()).total_seconds() > 7 * 86400:
+    if vence and (vence - ahora_ar()).total_seconds() > 7 * 86400:
         return cli["access_token"]
     if not (MP_CLIENT_ID and MP_CLIENT_SECRET and cli.get("refresh_token")):
         return cli["access_token"]
@@ -153,7 +159,7 @@ def token_cliente(alias):
         }, timeout=10)
         if r.status_code in (200, 201):
             t = r.json()
-            vence_nuevo = datetime.fromtimestamp(datetime.now().timestamp() + t.get("expires_in", 15552000)).isoformat()
+            vence_nuevo = (ahora_ar() + timedelta(seconds=t.get("expires_in", 15552000))).isoformat()
             guardar_cliente(alias, {
                 "access_token": t["access_token"],
                 "refresh_token": t.get("refresh_token", cli["refresh_token"]),
@@ -227,7 +233,7 @@ def insertar_orden(orden_id, dispositivo_id, segundos, monto=None):
     cur.execute(
         "INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha, monto) VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (id) DO NOTHING",
-        (orden_id, dispositivo_id, segundos, "pendiente", datetime.now().isoformat(), monto)
+        (orden_id, dispositivo_id, segundos, "pendiente", ahora_ar().isoformat(), monto)
     )
     conn.commit()
     cur.close()
@@ -295,7 +301,7 @@ def rearmar_qr(disp):
     # Comisión marketplace: solo aplica a dispositivos de clientes OAuth
     if disp.get("cliente") and FEE_PORCENTAJE > 0:
         orden["marketplace_fee"] = f"{float(disp['precio']) * FEE_PORCENTAJE / 100:.2f}"
-    ahora = datetime.now().isoformat()
+    ahora = ahora_ar().isoformat()
     try:
         r = requests.post("https://api.mercadopago.com/v1/orders", json=orden, headers=headers, timeout=10)
         if r.status_code == 201:
@@ -317,10 +323,10 @@ def consultar_orden(dispositivo_id):
     disp = get_dispositivo(dispositivo_id)
     if disp:
         # registrar que el equipo está vivo (para el reembolso automático)
-        actualizar_dispositivo(dispositivo_id, {"ultimo_poll": datetime.now().isoformat()})
+        actualizar_dispositivo(dispositivo_id, {"ultimo_poll": ahora_ar().isoformat()})
         rearme = disp.get("ultimo_rearme")
         try:
-            vencido = (not rearme) or (datetime.now() - datetime.fromisoformat(rearme)).total_seconds() > 600
+            vencido = (not rearme) or (ahora_ar() - datetime.fromisoformat(rearme)).total_seconds() > 600
         except (ValueError, TypeError):
             vencido = True
         if vencido:
@@ -336,7 +342,7 @@ def consultar_orden(dispositivo_id):
     if orden:
         cur.execute(
             "UPDATE ordenes SET estado='ejecutando', inicio=%s WHERE id=%s",
-            (datetime.now().isoformat(), orden["id"])
+            (ahora_ar().isoformat(), orden["id"])
         )
         conn.commit()
         cur.close()
@@ -355,7 +361,7 @@ def consultar_orden(dispositivo_id):
     conn.close()
     if ejecutando:
         try:
-            transcurrido = (datetime.now() - datetime.fromisoformat(ejecutando["inicio"])).total_seconds()
+            transcurrido = (ahora_ar() - datetime.fromisoformat(ejecutando["inicio"])).total_seconds()
             restante = int(ejecutando["segundos"] - transcurrido)
             if restante > 5:
                 return jsonify({"encender": True, "segundos": restante, "orden_id": ejecutando["id"]})
@@ -487,7 +493,7 @@ def oauth_callback():
         print(f"Error OAuth: {r.status_code} {r.text[:300]}")
         return "<h2>Hubo un problema al conectar la cuenta. Avisale a TermoPago.</h2>", 400
     t = r.json()
-    vence = datetime.fromtimestamp(datetime.now().timestamp() + t.get("expires_in", 15552000)).isoformat()
+    vence = (ahora_ar() + timedelta(seconds=t.get("expires_in", 15552000))).isoformat()
     guardar_cliente(alias, {
         "mp_user_id": str(t.get("user_id", "")),
         "access_token": t["access_token"],
@@ -791,8 +797,8 @@ def estadisticas(clave):
     # nombres lindos de cada máquina
     nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
 
-    hoy = datetime.now().strftime("%Y-%m-%d")
-    mes_actual = datetime.now().strftime("%Y-%m")
+    hoy = ahora_ar().strftime("%Y-%m-%d")
+    mes_actual = ahora_ar().strftime("%Y-%m")
 
     def nuevo(): return {"ventas": 0, "monto": 0.0, "reemb": 0}
     por_dia, por_mes, por_maq = {}, {}, {}
@@ -864,7 +870,7 @@ def estadisticas(clave):
 {tabla("Por mes", por_mes)}
 {tabla("Por máquina", por_maq, es_maquina=True)}
 <p class="nota">Solo pagos reales (QR y link), no simulaciones. Fechas y horas
-en horario del servidor. Los montos se registran desde julio 2026; ventas
+en horario de Argentina. Los montos se registran desde julio 2026; ventas
 anteriores cuentan en cantidad pero pueden figurar en $0.</p>
 </body></html>"""
 
@@ -887,7 +893,7 @@ def equipo_offline(disp):
     if not disp or not disp.get("ultimo_poll"):
         return True
     try:
-        return (datetime.now() - datetime.fromisoformat(disp["ultimo_poll"])).total_seconds() > 120
+        return (ahora_ar() - datetime.fromisoformat(disp["ultimo_poll"])).total_seconds() > 120
     except (ValueError, TypeError):
         return True
 
@@ -923,7 +929,7 @@ def vigilar_ordenes():
     Si el equipo está online (solo ocupado, con fila), no se toca."""
     while True:
         try:
-            limite = (datetime.now() - timedelta(minutes=REEMBOLSO_MINUTOS)).isoformat()
+            limite = (ahora_ar() - timedelta(minutes=REEMBOLSO_MINUTOS)).isoformat()
             conn = get_db()
             cur = conn.cursor()
             cur.execute("SELECT * FROM ordenes WHERE estado='pendiente' AND fecha < %s", (limite,))
