@@ -186,7 +186,22 @@ void setup() {
   lcd.begin(16, 2);
   lcd.backlight();
   mostrarMensaje("Iniciando...", "Por favor espere");
-  delay(2000);
+
+  // ── Reset de WiFi: si al encender el boton BOOT (GPIO 0) esta apretado
+  //    3 segundos, borra la red guardada y abre el portal para cargar otra.
+  pinMode(0, INPUT_PULLUP);
+  if (digitalRead(0) == LOW) {              // BOOT apretado
+    mostrarMensaje("Suelte BOOT para", "borrar WiFi...");
+    unsigned long t = millis();
+    while (digitalRead(0) == LOW && millis() - t < 3000) delay(50);
+    if (millis() - t >= 3000) {
+      WiFiManager wm;
+      wm.resetSettings();                   // olvida la red guardada
+      mostrarMensaje("WiFi borrado", "Configure de nuevo");
+      delay(1500);
+    }
+  }
+  delay(1500);
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // sin ahorro de energía: elimina los picos de corriente
