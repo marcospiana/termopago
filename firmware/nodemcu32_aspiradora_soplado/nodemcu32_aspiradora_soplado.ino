@@ -187,21 +187,27 @@ void setup() {
   lcd.backlight();
   mostrarMensaje("Iniciando...", "Por favor espere");
 
-  // ── Reset de WiFi: si al encender el boton BOOT (GPIO 0) esta apretado
-  //    3 segundos, borra la red guardada y abre el portal para cargar otra.
+  // ── Reset de WiFi: al ENCENDER NORMAL (sin apretar nada), hay una
+  //    ventana de 5 seg para apretar BOOT y borrar la red guardada.
+  //    (No apretar BOOT al prender: eso mete al ESP en modo grabacion.)
   pinMode(0, INPUT_PULLUP);
-  if (digitalRead(0) == LOW) {              // BOOT apretado
-    mostrarMensaje("Suelte BOOT para", "borrar WiFi...");
-    unsigned long t = millis();
-    while (digitalRead(0) == LOW && millis() - t < 3000) delay(50);
-    if (millis() - t >= 3000) {
+  mostrarMensaje("Cambiar WiFi?", "Apriete BOOT 5s");
+  { unsigned long t0 = millis(); bool reset = false;
+    while (millis() - t0 < 5000) {
+      if (digitalRead(0) == LOW) {          // BOOT apretado durante la ventana
+        unsigned long t1 = millis();
+        while (digitalRead(0) == LOW && millis() - t1 < 1000) delay(50);
+        if (millis() - t1 >= 1000) { reset = true; break; }
+      }
+      delay(50);
+    }
+    if (reset) {
       WiFiManager wm;
       wm.resetSettings();                   // olvida la red guardada
       mostrarMensaje("WiFi borrado", "Configure de nuevo");
       delay(1500);
     }
   }
-  delay(1500);
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // sin ahorro de energía: elimina los picos de corriente
