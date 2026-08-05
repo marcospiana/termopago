@@ -287,16 +287,12 @@ void loop() {
     Serial.println("WiFi reconectado: " + WiFi.localIP().toString());
   }
 
-  // 3. Polling alternado: un canal inactivo por ciclo
+  // 3. Polling: en cada ciclo pregunta por TODOS los canales inactivos
+  //    (los dos juntos), asi ambos quedan al dia en el mismo momento.
   if (millis() - ultimoPollMs >= INTERVALO_POLL_MS) {
     ultimoPollMs = millis();
-    for (int intento = 0; intento < NUM_CANALES; intento++) {
-      int i = canalAPollear;
-      canalAPollear = (canalAPollear + 1) % NUM_CANALES;
-      if (!activo[i]) {
-        pollearCanal(i);
-        break;
-      }
+    for (int i = 0; i < NUM_CANALES; i++) {
+      if (!activo[i]) pollearCanal(i);
     }
   }
 
