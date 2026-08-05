@@ -201,10 +201,27 @@
     <span class="badge" style="background:#eaf4fb;color:var(--azul);border:1px solid var(--cyan2);font-size:15px;padding:8px 18px">🚀 Próximamente</span>
     <h2 style="margin-top:16px">Estamos ultimando los detalles</h2>
     <p>TermoPago está en su etapa final de desarrollo. Muy pronto vas a poder sumarlo a tu negocio.</p>
-    <p style="margin-top:10px;font-size:17px">¿Consultas? Escribinos a<br>
-    <a href="mailto:contacto@termopago.com.ar?subject=Consulta%20sobre%20TermoPago" target="_blank" rel="noopener" style="color:var(--azul);font-weight:700;font-size:20px">contacto@termopago.com.ar</a></p>
+    <p style="margin-top:10px;font-size:17px">¿Consultas? Escribinos a</p>
+    <button id="mailBtn" onclick="copiarMail()" style="margin-top:8px;background:#eaf4fb;border:1.5px solid var(--cyan2);color:var(--azul);font-weight:700;font-size:19px;padding:12px 22px;border-radius:30px;cursor:pointer;display:inline-flex;align-items:center;gap:10px">
+      📧 <span id="mailTxt">contacto@termopago.com.ar</span>
+    </button>
+    <p id="mailMsg" style="height:20px;margin-top:10px;color:#2e7d32;font-weight:600;font-size:15px"></p>
   </div>
 </section>
+<script>
+function copiarMail(){
+  var mail = "contacto@termopago.com.ar";
+  var msg = document.getElementById("mailMsg");
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(mail).then(function(){
+      msg.textContent = "✅ ¡Copiado! Pegalo en tu correo";
+      setTimeout(function(){ msg.textContent=""; }, 3000);
+    }).catch(function(){ window.location.href = "mailto:"+mail; });
+  } else {
+    window.location.href = "mailto:"+mail;
+  }
+}
+</script>
 
 <!-- FOOTER -->
 <footer><div class="wrap">
