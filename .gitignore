@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Datos sensibles - NUNCA subir a GitHub
+ACCESOS_privado.txt
+docs/ACCESOS_privado.txt
+*_privado.txt

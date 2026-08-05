@@ -1,0 +1,73 @@
+BEZEL EMPOTRADO PARA LCD 16x2 (montaje al ras de la chapa) - TermoPago
+======================================================================
+
+CONCEPTO:
+El display se monta EMPOTRADO en el gabinete metalico. El labio (flange)
+apoya sobre la cara exterior de la chapa; el cuerpo entra por un calado
+rectangular y la pantalla queda al ras del frente.
+
+ARCHIVOS:
+- bezel_frontal.stl : labio + cuerpo embutido + soportes del LCD + postes
+- tapa_trasera.stl  : tapa-plato integrada; sujeta el LCD adelante y el
+                      screw shield del ESP32 atras (todo en un conjunto)
+
+=== 3 VERSIONES DISPONIBLES ===
+
+A) MINI (bezel_mini.stl) - la mas simple, corte chico
+   - Solo el frente: labio + ventana + soportes del LCD
+   - Corte en la chapa: SOLO 72 x 34 mm
+   - El LCD se atornilla desde ADENTRO del gabinete (M2.5)
+   - El ESP32 va suelto adentro, con su cableado
+   - Ideal para una primera prueba sin comprometer la chapa
+
+B) DIVISOR (bezel_frontal.stl + tapa_trasera.stl)
+   - Display adelante, ESP32+shield atras, separados por el plato
+   - Corte en la chapa: 87 x 57 mm | fondo ~55 mm
+
+C) COMPACTA (bezel_compacto.stl + tapa_compacta.stl)
+   - Display y shield en la misma cavidad
+   - Corte en la chapa: 88 x 80 mm | fondo ~44 mm
+   - Verificar que el modulo I2C no choque el ESP32
+
+CONJUNTO INTEGRADO (sandwich, versiones B y C):
+  [ventana/LCD] -> bezel -> tapa-plato -> [screw shield + ESP32]
+  El shield se atornilla a los 4 soportes de la cara trasera del plato
+  (separacion estimada 68 x 59 mm, M3). VERIFICAR con la placa real
+  antes de imprimir el lote. Las borneras quedan mirando al interior
+  del gabinete, accesibles para cablear.
+
+MEDIDAS (segun datasheet del display, PCB 80 x 36 mm):
+- Labio (visible sobre la chapa): 104 x 74 mm, espesor 2 mm
+- Cuerpo embutido: 86 x 56 mm, profundidad 33 mm
+- Ventana del display: 66 x 16 mm (cubre el area visible)
+- Soportes del LCD: separacion 71.2 x 31.0 mm, tornillo M2.5
+- Postes de la tapa: arriba y abajo del PCB (no estorban al display)
+
+>>> CALADO EN LA CHAPA <<<
+Recortar un rectangulo de 87 x 57 mm (deja ~0,5 mm de juego).
+El cuerpo entra por ahi y el labio de 104x74 tapa el borde del corte.
+Marcar y taladrar tambien los 4 agujeros M4 del labio (a 94 x 66 mm
+entre centros) para fijarlo a la chapa.
+
+TORNILLERIA:
+- 4 tornillos autorroscantes M2.5 x 6 mm -> LCD a los soportes
+- 4 tornillos autorroscantes M3 x 10 mm -> tapa trasera a los postes
+- 4 tornillos M4 -> fijar el labio a la chapa (con tuerca por dentro)
+- 1 prensacable PG7 -> entrada de cable en la tapa
+
+IMPRESION:
+- Material: PETG o ASA (NO PLA si va al sol)
+- Orientacion: apoyar el LABIO sobre la cama (cuerpo hacia arriba);
+  la ventana imprime sin soportes
+- Capa 0,2 mm | Relleno 40%+ | 3 perimetros
+
+ARMADO:
+1. Atornillar el LCD (pantalla hacia la ventana) a los 4 soportes;
+   la cara del vidrio queda al ras del labio
+2. Pasar el cable de 4 hilos (I2C) por el prensacable de la tapa
+3. Conectar al modulo I2C del LCD
+4. Atornillar la tapa a los 4 postes
+5. Meter el cuerpo por el calado de la chapa y fijar el labio con los
+   4 tornillos M4
+6. Para intemperie: cordon de silicona neutra entre el labio y la chapa
+   antes de atornillar (sella y evita que entre agua por el corte)
