@@ -88,6 +88,15 @@ def init_db():
             vence         TEXT
         )
     """)
+    # cortes: registro de desconexiones (huecos > 30s en el polling del ESP32)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cortes (
+            id             SERIAL PRIMARY KEY,
+            dispositivo_id TEXT,
+            fin            TEXT,
+            duracion_seg   INTEGER
+        )
+    """)
     # Migración: el termo original, con su caja existente y la config del panel viejo
     cur.execute("SELECT valor FROM config WHERE clave='precio'")
     row = cur.fetchone()
@@ -341,6 +350,19 @@ def consultar_orden(dispositivo_id):
     # (la orden vence a los 15: ventana de riesgo máxima si se corta la luz)
     disp = get_dispositivo(dispositivo_id)
     if disp:
+        # detectar corte: si el poll anterior fue hace más de 30s, el equipo
+        # estuvo desconectado ese tiempo. Se registra al reconectar.
+        up = disp.get("ultimo_poll")
+        if up:
+            try:
+                gap = (ahora_ar() - datetime.fromisoformat(up)).total_seconds()
+                if gap > 30:
+                    conn0 = get_db(); c0 = conn0.cursor()
+                    c0.execute("INSERT INTO cortes (dispositivo_id, fin, duracion_seg) VALUES (%s,%s,%s)",
+                               (dispositivo_id, ahora_ar().isoformat(), int(gap)))
+                    conn0.commit(); c0.close(); conn0.close()
+            except (ValueError, TypeError):
+                pass
         # registrar que el equipo está vivo (para el reembolso automático)
         actualizar_dispositivo(dispositivo_id, {"ultimo_poll": ahora_ar().isoformat()})
         rearme = disp.get("ultimo_rearme")
@@ -726,6 +748,82 @@ def config_panel(clave):
 </body></html>"""
 
 # ─── Diagnóstico de credenciales y QR ────────────────────────────
+
+@app.route("/cortes/<clave>")
+def cortes(clave):
+    """Cortes de conexión (huecos > 30s) por día y por máquina.
+    Sirve para ver si la señal es estable o tiene bajones durante el día."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT dispositivo_id, fin, duracion_seg FROM cortes ORDER BY fin DESC LIMIT 500")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
+
+    def dur(s):
+        if s < 60: return f"{s} seg"
+        if s < 3600: return f"{s//60} min {s%60} seg"
+        if s < 86400: return f"{s//3600} h {(s%3600)//60} min"
+        return f"{s//86400} días"
+
+    # resumen por día+máquina y lista detallada
+    resumen = {}   # (dia, disp) -> {cantidad, total}
+    detalle = []
+    for r in rows:
+        f = r["fin"] or ""
+        dia = f[:10]; hora = f[11:16]
+        did = r["dispositivo_id"]; s = int(r["duracion_seg"] or 0)
+        k = (dia, did)
+        resumen.setdefault(k, {"cant": 0, "total": 0})
+        resumen[k]["cant"] += 1; resumen[k]["total"] += s
+        detalle.append((dia, hora, did, s))
+
+    filas_res = ""
+    for (dia, did) in sorted(resumen.keys(), reverse=True):
+        d = resumen[(dia, did)]
+        color = "#2e7d32" if d["cant"] == 0 else ("#f9a825" if d["cant"] <= 3 else "#c62828")
+        filas_res += (f"<tr><td>{dia[8:10]}/{dia[5:7]}</td>"
+                      f"<td>{nombres.get(did,did)} <span style='color:#888;font-size:12px'>{did}</span></td>"
+                      f"<td style='color:{color};font-weight:700'>{d['cant']}</td>"
+                      f"<td>{dur(d['total'])}</td></tr>")
+    if not filas_res:
+        filas_res = '<tr><td colspan="4">Sin cortes registrados 🎉</td></tr>'
+
+    filas_det = ""
+    for dia, hora, did, s in detalle[:100]:
+        col = "#c62828" if s > 300 else "#f9a825"
+        filas_det += (f"<tr><td>{dia[8:10]}/{dia[5:7]}</td><td><b>{hora}</b></td>"
+                      f"<td>{nombres.get(did,did)} <span style='color:#888;font-size:12px'>{did}</span></td>"
+                      f"<td style='color:{col};font-weight:600'>{dur(s)}</td></tr>")
+    if not filas_det:
+        filas_det = '<tr><td colspan="4">—</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - Cortes de conexión</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 620px; margin: 24px auto; padding: 0 14px; color:#222; }}
+  h2 {{ margin-bottom:2px; }} h3 {{ margin:24px 0 8px; color:#1b4f72; }}
+  .sub {{ color:#888; font-size:13px; margin-bottom:14px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 8px 10px; font-size:14px; text-align:left; }}
+  th {{ background:#009ee3; color:white; }}
+</style></head><body>
+<h2>📉 Cortes de conexión</h2>
+<div class="sub">Cada vez que un equipo se queda sin llegar al servidor por más de 30 seg,
+queda registrado acá al reconectar. Hora de Argentina.</div>
+<h3>Resumen por día</h3>
+<table><tr><th>Día</th><th>Máquina</th><th>Cortes</th><th>Tiempo caído total</th></tr>{filas_res}</table>
+<h3>Detalle (últimos 100)</h3>
+<table><tr><th>Día</th><th>Reconectó</th><th>Máquina</th><th>Duración del corte</th></tr>{filas_det}</table>
+<p class="sub" style="margin-top:18px">Nota: un corte muy largo (horas) probablemente sea que el equipo
+estuvo apagado o sin luz, no un problema de señal.</p>
+</body></html>"""
 
 @app.route("/estado/<clave>")
 def estado(clave):
