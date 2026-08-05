@@ -4,13 +4,19 @@ TERMOPAGO - ENLACES UTILES
 Todas las paginas se ven bien desde el celular. Guardarlas en favoritos.
 
 =====================================================================
-PANEL DE CONTROL (uso diario) - las 4 paginas principales
+PANEL DE CONTROL (uso diario) - las paginas principales
 =====================================================================
 
-ESTADO DE EQUIPOS (conectado / intermitente / caido):
+ESTADO DE EQUIPOS (conectado / intermitente / caido - AHORA):
 https://web-production-94bbab.up.railway.app/estado/TU_CLAVE
   - se actualiza sola cada 30 seg
   - verde = OK, amarillo = senal floja, rojo = caido
+
+CORTES DE CONEXION (bajones > 30s durante el dia):
+https://web-production-94bbab.up.railway.app/cortes/TU_CLAVE
+  - resumen por dia: cuantos cortes y tiempo caido total por maquina
+  - detalle: hora en que reconecto y duracion de cada corte
+  - sirve para ver si la senal es estable sin vigilar en vivo
 
 HISTORIAL (dia, hora, maquina, monto, estado):
 https://web-production-94bbab.up.railway.app/historial/TU_CLAVE
