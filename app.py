@@ -327,6 +327,12 @@ def landing():
     except FileNotFoundError:
         return "TermoPago", 200
 
+@app.route("/logo/<path:archivo>")
+def logo_static(archivo):
+    from flask import send_from_directory
+    carpeta = os.path.join(os.path.dirname(__file__), "web", "logo")
+    return send_from_directory(carpeta, archivo)
+
 # ─── Rutas del ESP32 ─────────────────────────────────────────────
 
 @app.route("/orden/<dispositivo_id>")

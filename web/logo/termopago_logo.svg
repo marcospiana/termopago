@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 170" width="560" height="170">
+  <defs><linearGradient id="gb" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#0b3d91"/><stop offset="1" stop-color="#009ee3"/>
+  </linearGradient></defs>
+  <rect x="20" y="25" width="120" height="120" rx="26" fill="#ffffff" stroke="url(#gb)" stroke-width="5"/>
+  <g fill="url(#gb)">
+    <rect x="36" y="41" width="24" height="24" rx="5"/><rect x="100" y="41" width="24" height="24" rx="5"/>
+    <rect x="36" y="105" width="24" height="24" rx="5"/>
+    <rect x="43" y="48" width="10" height="10" fill="#fff"/><rect x="107" y="48" width="10" height="10" fill="#fff"/>
+    <rect x="43" y="112" width="10" height="10" fill="#fff"/>
+    <rect x="100" y="105" width="9" height="9"/><rect x="115" y="105" width="9" height="9"/>
+    <rect x="100" y="120" width="9" height="9"/><rect x="72" y="70" width="9" height="9"/>
+  </g>
+  <path d="M92 45 L62 98 L82 98 L70 128 L108 82 L86 82 Z" fill="#00b4d8" stroke="#fff" stroke-width="3"/>
+  <text x="165" y="103" font-family="Segoe UI, Arial, sans-serif" font-size="52" fill="#0e1b2c">
+    <tspan font-weight="400">Termo</tspan><tspan font-weight="800" fill="#009ee3">Pago</tspan></text>
+  <text x="167" y="130" font-family="Segoe UI, Arial, sans-serif" font-size="16" letter-spacing="3" fill="#5a6b7b">PAGOS QR PARA AUTOSERVICIO</text>
+</svg>
