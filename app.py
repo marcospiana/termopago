@@ -350,17 +350,24 @@ def consultar_orden(dispositivo_id):
     # (la orden vence a los 15: ventana de riesgo máxima si se corta la luz)
     disp = get_dispositivo(dispositivo_id)
     if disp:
-        # detectar corte: si el poll anterior fue hace más de 30s, el equipo
-        # estuvo desconectado ese tiempo. Se registra al reconectar.
+        # detectar corte REAL: si el poll anterior fue hace más de 30s.
+        # Pero NO contar el hueco si la máquina estuvo ANDANDO en ese lapso
+        # (mientras corre su tiempo no pollea ese canal -> hueco normal, no corte).
         up = disp.get("ultimo_poll")
         if up:
             try:
                 gap = (ahora_ar() - datetime.fromisoformat(up)).total_seconds()
                 if gap > 30:
                     conn0 = get_db(); c0 = conn0.cursor()
-                    c0.execute("INSERT INTO cortes (dispositivo_id, fin, duracion_seg) VALUES (%s,%s,%s)",
-                               (dispositivo_id, ahora_ar().isoformat(), int(gap)))
-                    conn0.commit(); c0.close(); conn0.close()
+                    # ¿hubo una orden que arrancó durante el hueco? -> estuvo andando
+                    c0.execute("SELECT 1 FROM ordenes WHERE dispositivo_id=%s AND inicio IS NOT NULL AND inicio >= %s LIMIT 1",
+                               (dispositivo_id, up))
+                    estuvo_andando = c0.fetchone() is not None
+                    if not estuvo_andando:
+                        c0.execute("INSERT INTO cortes (dispositivo_id, fin, duracion_seg) VALUES (%s,%s,%s)",
+                                   (dispositivo_id, ahora_ar().isoformat(), int(gap)))
+                        conn0.commit()
+                    c0.close(); conn0.close()
             except (ValueError, TypeError):
                 pass
         # registrar que el equipo está vivo (para el reembolso automático)
