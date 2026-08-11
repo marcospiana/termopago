@@ -1,4 +1,12 @@
-// TermoPago - Estación dual: Aspiradora + Soplador
+// ============================================================
+// TermoPago - Firmware de estacion dual (aspiradora + soplador)
+// VERSION PARA COMPARTIR - SANITIZADA
+//   - Sin la URL real del backend  -> reemplazar TU-BACKEND
+//   - Sin los IDs reales de las maquinas -> reemplazar TU_ID_1 / TU_ID_2
+// El resto del codigo es identico al que corre en produccion.
+// ============================================================
+
+// TermoPago - Estación 01: Aspiradora + Soplador
 // NodeMCU-32 / ESP32. Los dos servicios funcionan en paralelo
 // (firmware no bloqueante con timers por canal).
 
@@ -10,20 +18,26 @@
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_I2Cexp.h>
 #include <esp_task_wdt.h>
+#include <WiFiClientSecure.h>
+// ── Watchdog RTC (dominio siempre-encendido). Reinicia el chip aunque el
+//    task-watchdog no lo logre. Si NO compila, borrá esta linea y TODAS las
+//    lineas marcadas con "// RTC-WDT" mas abajo, y volvé a flashear.
+#include "rtc_wdt.h"
 
-const char* BACKEND_BASE  = "https://web-production-94bbab.up.railway.app";
+const char* BACKEND_BASE  = "https://TU-BACKEND.up.railway.app";
 const int   WDT_TIMEOUT_S = 120;
 const unsigned long INTERVALO_POLL_MS = 3000;
 
 // ─── Canales ─────────────────────────────────────────────────────
 const int NUM_CANALES = 2;
-const char* IDS[NUM_CANALES]     = {"aspiradora01", "soplado01"};
+const char* IDS[NUM_CANALES]     = {"TU_ID_1", "TU_ID_2"};
 const char* ETIQ[NUM_CANALES]    = {"Aspirad", "Soplado"};  // max 7 chars (LCD)
 const int   RELAY_PIN[NUM_CANALES] = {25, 26};
 
 bool          activo[NUM_CANALES]  = {false, false};
 unsigned long finMs[NUM_CANALES]   = {0, 0};
 String        ordenId[NUM_CANALES] = {"", ""};
+String        pendienteCompletar[NUM_CANALES] = {"", ""};  // orden a confirmar luego
 
 hd44780_I2Cexp lcd;
 bool wifiConectadoMostrado = false;
@@ -35,6 +49,8 @@ unsigned long ultimoReintentoMs = 0;  // último WiFi.begin() forzado
 unsigned long ultimoReinitLcdMs = 0;  // última re-inicialización del LCD
 unsigned long ultimoPollOkMs = 0;     // último polling EXITOSO al backend
 bool huboPollOk = false;              // ¿alguna vez conectó al server?
+unsigned long reinitLcdEnMs = 0;      // reinit del LCD diferido (0 = nada pendiente)
+unsigned long bootMs = 0;             // momento de arranque (margen anti reinicio falso)
 
 // ─── LCD ─────────────────────────────────────────────────────────
 void mostrarMensaje(String linea1, String linea2 = "") {
@@ -125,6 +141,16 @@ void iniciarWatchdog() {
   esp_task_wdt_init(WDT_TIMEOUT_S, true);
 #endif
   esp_task_wdt_add(NULL);
+
+  // ── RTC-WDT: watchdog en el dominio RTC (siempre encendido). Es el que
+  //    de verdad reinicia si el chip se cuelga y el task-watchdog no responde.
+  //    Timeout 60 s. Si esto no compila, borrá este bloque y el include de
+  //    arriba y volvé a flashear (el resto de las mejoras siguen valiendo).
+  rtc_wdt_protect_off();                                              // RTC-WDT
+  rtc_wdt_set_stage(RTC_WDT_STAGE0, RTC_WDT_STAGE_ACTION_RESET_SYSTEM); // RTC-WDT
+  rtc_wdt_set_time(RTC_WDT_STAGE0, 60000);                           // RTC-WDT
+  rtc_wdt_enable();                                                  // RTC-WDT
+  rtc_wdt_protect_on();                                              // RTC-WDT
 }
 
 // ─── Backend ─────────────────────────────────────────────────────
@@ -132,8 +158,11 @@ void completarOrden(String id) {
   if (id == "") return;
   for (int intento = 0; intento < 3; intento++) {
     esp_task_wdt_reset();
+    WiFiClientSecure client;
+    client.setInsecure();   // sin validar certificado: menos RAM y sin cuelgues de TLS
     HTTPClient http;
-    http.begin(String(BACKEND_BASE) + "/completar/" + id);
+    http.begin(client, String(BACKEND_BASE) + "/completar/" + id);
+    http.setConnectTimeout(4000);  // acota el intento de conexion (server caido)
     http.setTimeout(5000);
     int code = http.GET();
     http.end();
@@ -147,8 +176,12 @@ void completarOrden(String id) {
 }
 
 void pollearCanal(int i) {
+  esp_task_wdt_reset();
+  WiFiClientSecure client;
+  client.setInsecure();   // sin validar certificado: menos RAM y sin cuelgues de TLS
   HTTPClient http;
-  http.begin(String(BACKEND_BASE) + "/orden/" + IDS[i]);
+  http.begin(client, String(BACKEND_BASE) + "/orden/" + IDS[i]);
+  http.setConnectTimeout(4000);  // acota el intento de conexion (server caido)
   http.setTimeout(5000);
   int code = http.GET();
 
@@ -163,8 +196,8 @@ void pollearCanal(int i) {
       activo[i] = true;
       finMs[i] = millis() + (unsigned long)segundos * 1000UL;
       digitalWrite(RELAY_PIN[i], LOW);  // encender
-      delay(30);
-      reiniciarLcd();  // recupera el LCD del pico de conmutacion del rele
+      invalidarLcd();               // solo marca cache (no toca I2C ahora)
+      reinitLcdEnMs = millis() + 250;  // reinit del LCD 250ms despues, con el ruido ya pasado
       Serial.println(String(ETIQ[i]) + " ON por " + String(segundos) + "s (orden " + ordenId[i] + ")");
     }
   } else {
@@ -183,6 +216,9 @@ void setup() {
   }
 
   Wire.begin(21, 22);
+  Wire.setTimeOut(50);   // el I2C se corta a los 50ms en vez de colgar el micro
+  Wire.setClock(50000);   // I2C mas lento: aguanta mejor el cable de 2m al display
+                         // si el ruido del rele deja el bus trabado (SDA pegada)
   lcd.begin(16, 2);
   lcd.backlight();
   mostrarMensaje("Iniciando...", "Por favor espere");
@@ -219,7 +255,7 @@ void setup() {
 
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(180);
-  if (!wifiManager.autoConnect("TermoPago-Duo")) {
+  if (!wifiManager.autoConnect("TermoPago-Est01")) {
     mostrarMensaje("Error WiFi", "Reiniciando...");
     delay(3000);
     ESP.restart();
@@ -229,51 +265,72 @@ void setup() {
   wifiConectadoMostrado = true;
   lcd.clear();
 
+  bootMs = millis();  // referencia de arranque; ultimoPollOkMs queda en 0 hasta
+                      // que HAYA un poll real (asi el display no miente al prender)
   iniciarWatchdog();
 }
 
 // ─── Loop principal (no bloqueante) ──────────────────────────────
 void loop() {
   esp_task_wdt_reset();
+  rtc_wdt_feed();   // RTC-WDT: alimentar el watchdog RTC (borrar si no compila)
 
-  // 1. Apagar canales cuyo tiempo terminó
-  for (int i = 0; i < NUM_CANALES; i++) {
-    if (activo[i] && (long)(finMs[i] - millis()) <= 0) {
-      digitalWrite(RELAY_PIN[i], HIGH);  // apagar
-      delay(30);
-      reiniciarLcd();  // recupera el LCD del pico de conmutacion del rele
-      activo[i] = false;
-      Serial.println(String(ETIQ[i]) + " OFF");
-      completarOrden(ordenId[i]);
-      ordenId[i] = "";
+  // 0. Redes de seguridad SOLO con las dos máquinas apagadas (no cortar un
+  //    servicio pago). Recuperan cuelgues "blandos" donde el loop sigue vivo.
+  if (!activo[0] && !activo[1]) {
+    // a) heap bajo => fuga de memoria; reiniciar antes de que crashee
+    if (ESP.getFreeHeap() < 40000) {
+      Serial.println("Heap bajo, reiniciando preventivamente...");
+      delay(200);
+      ESP.restart();
+    }
+    // b) Sin llegar al server hace 2 min estando en reposo, sea cual sea el
+    //    motivo (WiFi caido, "conectando" eterno, flapping, enlace zombie,
+    //    o nunca conecto desde el arranque): reiniciar SIEMPRE. Sin condicion
+    //    de huboPollOk, para que no quede atrapado como paso recien.
+    //    En reposo no hay servicio pago que cortar.
+    if (millis() - bootMs > 120000 && millis() - ultimoPollOkMs > 120000) {
+      Serial.println("Sin llegar al server 2min (idle), reiniciando...");
+      delay(200);
+      ESP.restart();
     }
   }
 
-  // 2. WiFi con reconexión ACTIVA (no depende solo de setAutoReconnect).
-  //    Ante caída dura del enlace WDS, el auto-reconnect a veces se rinde;
-  //    acá forzamos begin() periódicamente y, si no vuelve, reiniciamos.
+  // 1. Apagar canales cuyo tiempo terminó.
+  //    IMPORTANTE: el apagado tiene que ser INSTANTANEO. Justo aca la bobina
+  //    del contactor se desenergiza y genera el mayor pico inductivo (fue el
+  //    momento exacto en que se colgo). NO hacemos la llamada HTTP de
+  //    /completar aca: la dejamos pendiente y se confirma en el ciclo
+  //    siguiente, con el transitorio ya pasado y sin bloquear en el peor
+  //    instante.
+  for (int i = 0; i < NUM_CANALES; i++) {
+    if (activo[i] && (long)(finMs[i] - millis()) <= 0) {
+      digitalWrite(RELAY_PIN[i], HIGH);  // apagar (instantaneo)
+      activo[i] = false;
+      pendienteCompletar[i] = ordenId[i];  // confirmar despues, no aca
+      ordenId[i] = "";
+      Serial.println(String(ETIQ[i]) + " OFF");
+      invalidarLcd();               // solo marca cache (no toca I2C ahora)
+      reinitLcdEnMs = millis() + 250;  // reinit del LCD 250ms despues, con el ruido ya pasado
+    }
+  }
+
+  // 2. WiFi caido: SIMPLE y robusto. NO tocamos el driver a la fuerza
+  //    (el disconnect()/begin() en bucle lo trababa y colgaba el loop).
+  //    Dejamos que el auto-reconnect del driver trabaje solo; si no vuelve
+  //    en 60s, reinicio LIMPIO (el reboot reconecta de cero, sin wedge).
   if (WiFi.status() != WL_CONNECTED) {
-    unsigned long ahora = millis();
     if (wifiConectadoMostrado) {
       wifiConectadoMostrado = false;
-      inicioCaidaMs = ahora;          // marca cuándo empezó la caída
-      ultimoReintentoMs = ahora;
+      inicioCaidaMs = millis();       // marca cuándo empezó la caída
       mostrarMensaje("WiFi perdido", "Reconectando...");
       invalidarLcd();
       Serial.println("WiFi perdido...");
     }
-    // reintento forzado cada 15 s (WiFi.begin despierta al driver colgado)
-    if (ahora - ultimoReintentoMs >= 15000) {
-      ultimoReintentoMs = ahora;
-      Serial.println("Forzando reconexion WiFi...");
-      WiFi.disconnect();
-      WiFi.begin();                   // usa las credenciales guardadas
-    }
-    // si sigue caído tras 3 min, reiniciar (ultimo recurso, se auto-recupera)
-    if (ahora - inicioCaidaMs >= 180000) {
-      mostrarMensaje("Sin WiFi 3min", "Reiniciando...");
-      Serial.println("WiFi caido 3min, reiniciando...");
-      delay(1500);
+    if (millis() - inicioCaidaMs >= 60000) {   // 60s sin WiFi => reboot limpio
+      mostrarMensaje("Sin WiFi", "Reiniciando...");
+      Serial.println("WiFi caido 60s, reiniciando...");
+      delay(500);
       ESP.restart();
     }
     // los servicios activos siguen corriendo aunque no haya WiFi
@@ -285,6 +342,15 @@ void loop() {
     lcd.clear();
     invalidarLcd();
     Serial.println("WiFi reconectado: " + WiFi.localIP().toString());
+  }
+
+  // 2b. Confirmar al backend las ordenes que terminaron (fuera del momento
+  //     critico del apagado; aca ya hay WiFi y el pico inductivo ya paso).
+  for (int i = 0; i < NUM_CANALES; i++) {
+    if (pendienteCompletar[i] != "") {
+      completarOrden(pendienteCompletar[i]);
+      pendienteCompletar[i] = "";
+    }
   }
 
   // 3. Polling: en cada ciclo pregunta por TODOS los canales inactivos
@@ -300,6 +366,13 @@ void loop() {
   if (millis() - ultimoLcdMs >= 1000) {
     ultimoLcdMs = millis();
     refrescarLcd();
+  }
+
+  // 4b. Reinit del LCD diferido: se programa al conmutar un rele y se ejecuta
+  //     250ms despues, con el pico de ruido ya pasado (evita colgar el I2C).
+  if (reinitLcdEnMs && millis() >= reinitLcdEnMs) {
+    reinitLcdEnMs = 0;
+    reiniciarLcd();
   }
 
   // 5. Re-inicializacion periodica de seguridad (cada 5 min): red de

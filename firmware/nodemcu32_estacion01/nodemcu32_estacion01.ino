@@ -1,4 +1,4 @@
-// TermoPago - Estación dual: Aspiradora + Soplador
+// TermoPago - Estación 01: Aspiradora + Soplador
 // NodeMCU-32 / ESP32. Los dos servicios funcionan en paralelo
 // (firmware no bloqueante con timers por canal).
 
@@ -22,7 +22,7 @@ const unsigned long INTERVALO_POLL_MS = 3000;
 
 // ─── Canales ─────────────────────────────────────────────────────
 const int NUM_CANALES = 2;
-const char* IDS[NUM_CANALES]     = {"aspiradora02", "soplado02"};
+const char* IDS[NUM_CANALES]     = {"aspiradora01", "soplado01"};
 const char* ETIQ[NUM_CANALES]    = {"Aspirad", "Soplado"};  // max 7 chars (LCD)
 const int   RELAY_PIN[NUM_CANALES] = {25, 26};
 
@@ -209,6 +209,7 @@ void setup() {
 
   Wire.begin(21, 22);
   Wire.setTimeOut(50);   // el I2C se corta a los 50ms en vez de colgar el micro
+  Wire.setClock(50000);   // I2C mas lento: aguanta mejor el cable de 2m al display
                          // si el ruido del rele deja el bus trabado (SDA pegada)
   lcd.begin(16, 2);
   lcd.backlight();
@@ -246,7 +247,7 @@ void setup() {
 
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(180);
-  if (!wifiManager.autoConnect("TermoPago-Duo")) {
+  if (!wifiManager.autoConnect("TermoPago-Est01")) {
     mostrarMensaje("Error WiFi", "Reiniciando...");
     delay(3000);
     ESP.restart();

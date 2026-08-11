@@ -97,6 +97,15 @@ def init_db():
             duracion_seg   INTEGER
         )
     """)
+    # reinicios: cada arranque del ESP reporta la causa del reinicio
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reinicios (
+            id             SERIAL PRIMARY KEY,
+            dispositivo_id TEXT,
+            motivo         TEXT,
+            fecha          TEXT
+        )
+    """)
     # Migración: el termo original, con su caja existente y la config del panel viejo
     cur.execute("SELECT valor FROM config WHERE clave='precio'")
     row = cur.fetchone()
@@ -755,6 +764,114 @@ def config_panel(clave):
 </body></html>"""
 
 # ─── Diagnóstico de credenciales y QR ────────────────────────────
+
+@app.route("/boot/<dispositivo_id>/<motivo>")
+def boot(dispositivo_id, motivo):
+    """El ESP reporta acá cada vez que arranca, con la causa del reinicio.
+    Abierto (como /orden): el ESP no maneja la clave."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO reinicios (dispositivo_id, motivo, fecha) VALUES (%s,%s,%s)",
+                    (dispositivo_id, (motivo or "?")[:40], ahora_ar().isoformat()))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        return "err", 500
+    return "ok"
+
+
+@app.route("/reinicios/<clave>")
+def reinicios(clave):
+    """Historial de reinicios del ESP con la causa y cuánto estuvo activo antes
+    de cada reinicio. Sirve para saber POR QUÉ falla (watchdog, pico eléctrico,
+    corte de luz, WiFi) sin adivinar."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    conn = get_db(); cur = conn.cursor()
+    cur.execute("SELECT dispositivo_id, motivo, fecha FROM reinicios ORDER BY fecha ASC LIMIT 1000")
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
+
+    def dur(s):
+        s = int(s)
+        if s < 60: return f"{s} seg"
+        if s < 3600: return f"{s//60} min"
+        if s < 86400: return f"{s//3600} h {(s%3600)//60} min"
+        return f"{s//86400} d {(s%86400)//3600} h"
+
+    etiqueta = {
+        "corte-luz":     "🔌 Corte de luz / encendido",
+        "software":      "🔄 Reinicio del programa (WiFi/servidor)",
+        "panic-crash":   "⚠️ Crash de software",
+        "wdt-task":      "⚠️ Watchdog (se colgó)",
+        "wdt-interrupt": "⚠️ Watchdog interrupt",
+        "wdt-otro":      "⚠️ Watchdog",
+        "brownout-elec": "⚡ Bajón de tensión / pico eléctrico",
+        "reset-externo": "Reset externo",
+        "desconocido":   "Desconocido",
+    }
+    malos = ("panic-crash", "wdt-task", "wdt-interrupt", "wdt-otro", "brownout-elec")
+
+    # tiempo activo = gap con el boot anterior del mismo equipo
+    prev = {}
+    eventos = []
+    resumen = {}
+    for r in rows:
+        did = r["dispositivo_id"]; mot = r["motivo"] or "desconocido"; f = r["fecha"] or ""
+        activo = None
+        if did in prev:
+            try:
+                activo = int((datetime.fromisoformat(f) - datetime.fromisoformat(prev[did])).total_seconds())
+            except Exception:
+                activo = None
+        prev[did] = f
+        eventos.append((f, did, mot, activo))
+        resumen[mot] = resumen.get(mot, 0) + 1
+
+    filas_res = ""
+    for mot, cant in sorted(resumen.items(), key=lambda x: -x[1]):
+        col = "#c62828" if mot in malos else "#555"
+        filas_res += f"<tr><td style='color:{col}'>{etiqueta.get(mot, mot)}</td><td><b>{cant}</b></td></tr>"
+    if not filas_res:
+        filas_res = '<tr><td colspan="2">Sin reinicios registrados 🎉</td></tr>'
+
+    filas_det = ""
+    for f, did, mot, activo in reversed(eventos[-150:]):
+        dia = f[:10]; hora = f[11:16]
+        act = dur(activo) if activo is not None else "—"
+        col = "#c62828" if mot in malos else "#555"
+        filas_det += (f"<tr><td>{dia[8:10]}/{dia[5:7]}</td><td><b>{hora}</b></td>"
+                      f"<td>{nombres.get(did, did)}</td>"
+                      f"<td style='color:{col}'>{etiqueta.get(mot, mot)}</td>"
+                      f"<td>{act}</td></tr>")
+    if not filas_det:
+        filas_det = '<tr><td colspan="5">—</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - Reinicios</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 640px; margin: 24px auto; padding: 0 14px; color:#222; }}
+  h2 {{ margin-bottom:2px; }} h3 {{ margin:24px 0 8px; color:#1b4f72; }}
+  .sub {{ color:#888; font-size:13px; margin-bottom:14px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #e0e0e0; padding: 8px 10px; font-size:14px; text-align:left; }}
+  th {{ background:#009ee3; color:white; }}
+</style></head><body>
+<h2>🔁 Reinicios del equipo</h2>
+<div class="sub">Cada vez que el ESP arranca reporta por qué se reinició y cuánto estuvo
+activo antes. Los que están en <b style="color:#c62828">rojo</b> son fallas (colgado, pico
+eléctrico, crash); los grises son normales (corte de luz, reinicio por WiFi). Hora de Argentina.</div>
+<h3>Resumen por causa</h3>
+<table><tr><th>Causa</th><th>Veces</th></tr>{filas_res}</table>
+<h3>Detalle (últimos 150)</h3>
+<table><tr><th>Día</th><th>Hora</th><th>Equipo</th><th>Causa del reinicio</th><th>Estuvo activo</th></tr>{filas_det}</table>
+<p class="sub" style="margin-top:18px">Nota: "Estuvo activo" es cuánto funcionó desde el reinicio
+anterior. Si ves muchos reinicios con poco tiempo activo, algo está fallando seguido.</p>
+</body></html>"""
+
 
 @app.route("/cortes/<clave>")
 def cortes(clave):
