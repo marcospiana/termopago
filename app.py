@@ -842,7 +842,7 @@ def reinicios(clave):
         act = dur(activo) if activo is not None else "—"
         col = "#c62828" if mot in malos else "#555"
         filas_det += (f"<tr><td>{dia[8:10]}/{dia[5:7]}</td><td><b>{hora}</b></td>"
-                      f"<td>{nombres.get(did, did)}</td>"
+                      f"<td>{nombres.get(did, did)} <span style='color:#888;font-size:12px'>{did}</span></td>"
                       f"<td style='color:{col}'>{etiqueta.get(mot, mot)}</td>"
                       f"<td>{act}</td></tr>")
     if not filas_det:

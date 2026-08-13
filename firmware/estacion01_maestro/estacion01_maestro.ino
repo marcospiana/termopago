@@ -1,4 +1,4 @@
-// TermoPago - ESTACION 02 - MAESTRO (ESP32)  [solo WiFi + backend]
+// TermoPago - ESTACION 01 - MAESTRO (ESP32)  [solo WiFi + backend]
 // =====================================================================
 // Este ESP SOLO hace WiFi + backend. Cuando entra un pago, le ordena al
 // ESCLAVO que active el canal por X segundos. El ESCLAVO maneja el RELE,
@@ -25,7 +25,7 @@ const int   WDT_TIMEOUT_S = 30;   // si el loop se cuelga 30s, el watchdog reini
 const unsigned long INTERVALO_POLL_MS = 3000;
 
 const int NUM_CANALES = 2;
-const char* IDS[NUM_CANALES]     = {"aspiradora02", "soplado02"};
+const char* IDS[NUM_CANALES]     = {"aspiradora01", "soplado01"};
 const char* NOMBRES[NUM_CANALES] = {"Aspiradora", "Soplador"};
 const char* ETIQ[NUM_CANALES]    = {"Aspirad", "Soplado"};
 const int   RELAY_PIN[NUM_CANALES] = {25, 26};
@@ -33,6 +33,13 @@ const int   RELAY_PIN[NUM_CANALES] = {25, 26};
 // UART al display (ESP8266). Solo enviamos (un sentido).
 #define LINK_RX 16   // sin uso
 #define LINK_TX 17   // -> RX del ESP8266
+
+// ── Clavar la conexion a la banda 2.4GHz (evita el band-steering a 5GHz). ──
+//    BSSID = MAC de la radio 2.4 de la red (sacado del escaner). Si cambias
+//    de red, actualiza estos dos valores. Para NO clavar, poner LOCK_ON 0.
+#define LOCK_ON 1
+uint8_t LOCK_BSSID[6] = {0x9C, 0x53, 0x22, 0x21, 0xDA, 0xEC};  // Home3523 2.4GHz
+int32_t LOCK_CHANNEL  = 6;
 
 bool          activo[NUM_CANALES]  = {false, false};
 unsigned long finMs[NUM_CANALES]   = {0, 0};
@@ -197,23 +204,34 @@ void setup() {
   mostrar("Conectando WiFi", "Por favor espere");
   {
     WiFiManager wm;
-    String red = wm.getWiFiSSID();   // SSID guardado (si ya se configuro una vez)
+    String red  = wm.getWiFiSSID();   // SSID guardado (si ya se configuro una vez)
+    String pass = wm.getWiFiPass();   // clave guardada (queda en NVS, no en el codigo)
     if (red.length() > 0) {
-      // HAY red guardada: conectar SIN abrir el portal. Si no logra conectar,
-      // reinicia y vuelve a intentar la MISMA red. Nunca queda esperando que
-      // alguien lo configure (era lo que lo dejaba muerto hasta reiniciar).
-      WiFi.begin();                  // usa las credenciales guardadas
+      // HAY red guardada: conectar SIN abrir el portal.
       unsigned long t0 = millis();
+#if LOCK_ON
+      // Primero, CLAVADO al BSSID de 2.4GHz (evita band-steering a 5GHz).
+      WiFi.begin(red.c_str(), pass.c_str(), LOCK_CHANNEL, LOCK_BSSID);
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 18000) delay(250);
+      // Si no conecto clavado (el router cambio de canal/MAC), probar normal.
+      if (WiFi.status() != WL_CONNECTED) {
+        WiFi.begin(red.c_str(), pass.c_str());
+        t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(250);
+      }
+#else
+      WiFi.begin();                  // usa las credenciales guardadas (sin clavar)
       while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) delay(250);
+#endif
       if (WiFi.status() != WL_CONNECTED) {
         mostrar("Sin WiFi", "Reintentando...");
         delay(1000);
-        ESP.restart();               // reintenta la red guardada, sin portal
+        ESP.restart();               // reintenta, sin portal
       }
     } else {
       // PRIMERA VEZ / sin credenciales (o tras borrar con BOOT): abrir portal
       wm.setConfigPortalTimeout(180);
-      if (!wm.autoConnect("TermoPago-Est02")) { delay(1000); ESP.restart(); }
+      if (!wm.autoConnect("TermoPago-Est01")) { delay(1000); ESP.restart(); }
     }
   }
 
