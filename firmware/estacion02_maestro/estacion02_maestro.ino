@@ -229,12 +229,18 @@ void loop() {
   esp_task_wdt_reset();
   rtc_wdt_feed();   // RTC-WDT
 
-  // 0. Redes de seguridad SOLO en reposo (no cortar servicio pago)
-  if (!activo[0] && !activo[1]) {
-    if (ESP.getFreeHeap() < 40000) { Serial.println("Heap bajo, reiniciando..."); delay(200); ESP.restart(); }
-    if (millis() - bootMs > 120000 && millis() - ultimoPollOkMs > 120000) {
-      Serial.println("Sin server 2min (idle), reiniciando..."); delay(200); ESP.restart();
-    }
+  // 0. Red de seguridad UNIVERSAL: si hace 60s que no llega al servidor —sea el
+  //    motivo que sea (WiFi caido, enlace "zombie" que dice conectado pero no
+  //    responde, cambio de canal del router, auto-reconnect fallado)— REINICIA.
+  //    Un reinicio reconecta siempre. Y como el servicio lo tiene el esclavo,
+  //    reiniciar el maestro NO corta nada.
+  if (millis() - bootMs > 60000 && millis() - ultimoPollOkMs > 60000) {
+    Serial.println("Sin llegar al server 60s, reiniciando para reconectar...");
+    mostrar("Reconectando", "Reiniciando...");
+    delay(300); ESP.restart();
+  }
+  if (!activo[0] && !activo[1] && ESP.getFreeHeap() < 40000) {
+    Serial.println("Heap bajo, reiniciando..."); delay(200); ESP.restart();
   }
 
   // 1. Timer PARALELO (solo para confirmar /completar y no re-pollear el canal
@@ -248,17 +254,15 @@ void loop() {
     }
   }
 
-  // 2. WiFi caido: simple. Auto-reconnect; si no vuelve en 60s, reboot limpio
+  // 2. WiFi caido: mostrar el estado y esperar al auto-reconnect. El reinicio de
+  //    recuperacion lo dispara la red de seguridad universal de arriba (60s sin
+  //    server), que cubre TAMBIEN el caso "zombie" (status conectado pero sin
+  //    llegar al server) sin depender de un timer que el flapping resetee.
   if (WiFi.status() != WL_CONNECTED) {
     if (wifiConectadoMostrado) {
       wifiConectadoMostrado = false;
-      inicioCaidaMs = millis();
       mostrar("WiFi perdido", "Reconectando...");
       Serial.println("WiFi perdido...");
-    }
-    if (millis() - inicioCaidaMs >= 60000) {
-      mostrar("Sin WiFi", "Reiniciando...");
-      Serial.println("WiFi caido 60s, reiniciando..."); delay(500); ESP.restart();
     }
     delay(200);
     return;

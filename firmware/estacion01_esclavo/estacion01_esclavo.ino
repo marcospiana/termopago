@@ -97,7 +97,7 @@ void refrescar() {
   else if (!activo[0] && activo[1]) { l1 = NOMBRES[1]; l2 = "Quedan " + tiempoRestante(1); }
   else if (activo[0] && activo[1])  { l1 = "Aspir: " + tiempoRestante(0); l2 = "Sopla: " + tiempoRestante(1); }
   else {
-    if (millis() - ultimoRxMs > 6000) { l1 = "Sin datos"; l2 = "revisar enlace"; }
+    if (millis() - ultimoRxMs > 20000) { l1 = "Sin datos"; l2 = "revisar enlace"; }
     else { l1 = idle1; l2 = idle2; }
   }
   escribir(0, l1);

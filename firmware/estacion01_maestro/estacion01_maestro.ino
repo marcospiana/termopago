@@ -38,8 +38,8 @@ const int   RELAY_PIN[NUM_CANALES] = {25, 26};
 //    BSSID = MAC de la radio 2.4 de la red (sacado del escaner). Si cambias
 //    de red, actualiza estos dos valores. Para NO clavar, poner LOCK_ON 0.
 #define LOCK_ON 1
-uint8_t LOCK_BSSID[6] = {0x9C, 0x53, 0x22, 0x21, 0xDA, 0xEC};  // Home3523 2.4GHz
-int32_t LOCK_CHANNEL  = 6;
+uint8_t LOCK_BSSID[6] = {0x58, 0x56, 0xC2, 0x4A, 0x1C, 0x98};  // MEGA FIBRA-2.4G-6yEt 2.4GHz
+int32_t LOCK_CHANNEL  = 2;
 
 bool          activo[NUM_CANALES]  = {false, false};
 unsigned long finMs[NUM_CANALES]   = {0, 0};
@@ -247,12 +247,18 @@ void loop() {
   esp_task_wdt_reset();
   rtc_wdt_feed();   // RTC-WDT
 
-  // 0. Redes de seguridad SOLO en reposo (no cortar servicio pago)
-  if (!activo[0] && !activo[1]) {
-    if (ESP.getFreeHeap() < 40000) { Serial.println("Heap bajo, reiniciando..."); delay(200); ESP.restart(); }
-    if (millis() - bootMs > 120000 && millis() - ultimoPollOkMs > 120000) {
-      Serial.println("Sin server 2min (idle), reiniciando..."); delay(200); ESP.restart();
-    }
+  // 0. Red de seguridad UNIVERSAL: si hace 60s que no llega al servidor —sea el
+  //    motivo que sea (WiFi caido, enlace "zombie" que dice conectado pero no
+  //    responde, cambio de canal del router, auto-reconnect fallado)— REINICIA.
+  //    Un reinicio reconecta siempre. Y como el servicio lo tiene el esclavo,
+  //    reiniciar el maestro NO corta nada.
+  if (millis() - bootMs > 60000 && millis() - ultimoPollOkMs > 60000) {
+    Serial.println("Sin llegar al server 60s, reiniciando para reconectar...");
+    mostrar("Reconectando", "Reiniciando...");
+    delay(300); ESP.restart();
+  }
+  if (!activo[0] && !activo[1] && ESP.getFreeHeap() < 40000) {
+    Serial.println("Heap bajo, reiniciando..."); delay(200); ESP.restart();
   }
 
   // 1. Timer PARALELO (solo para confirmar /completar y no re-pollear el canal
@@ -266,17 +272,15 @@ void loop() {
     }
   }
 
-  // 2. WiFi caido: simple. Auto-reconnect; si no vuelve en 60s, reboot limpio
+  // 2. WiFi caido: mostrar el estado y esperar al auto-reconnect. El reinicio de
+  //    recuperacion lo dispara la red de seguridad universal de arriba (60s sin
+  //    server), que cubre TAMBIEN el caso "zombie" (status conectado pero sin
+  //    llegar al server) sin depender de un timer que el flapping resetee.
   if (WiFi.status() != WL_CONNECTED) {
     if (wifiConectadoMostrado) {
       wifiConectadoMostrado = false;
-      inicioCaidaMs = millis();
       mostrar("WiFi perdido", "Reconectando...");
       Serial.println("WiFi perdido...");
-    }
-    if (millis() - inicioCaidaMs >= 60000) {
-      mostrar("Sin WiFi", "Reiniciando...");
-      Serial.println("WiFi caido 60s, reiniciando..."); delay(500); ESP.restart();
     }
     delay(200);
     return;
