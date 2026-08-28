@@ -3,3 +3,4 @@ mercadopago
 psycopg2-binary
 gunicorn
 requests
+paho-mqtt<2.0

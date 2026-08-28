@@ -33,6 +33,42 @@ FEE_PORCENTAJE   = float(os.environ.get("FEE_PORCENTAJE", "0"))  # tu comisión,
 # el equipo (offline) la ejecute, antes de devolverle el dinero al cliente
 REEMBOLSO_MINUTOS = int(os.environ.get("REEMBOLSO_MINUTOS", "5"))
 
+# ─── MQTT: activación push de cajas tipo "pulso" (ej. inflado) ───────
+import ssl
+import json as _json
+try:
+    import paho.mqtt.publish as _mqtt_publish
+except ImportError:
+    _mqtt_publish = None
+
+MQTT_HOST = os.environ.get("MQTT_HOST")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
+MQTT_USER = os.environ.get("MQTT_USER")
+MQTT_PASS = os.environ.get("MQTT_PASS")
+
+# Cajas que se activan por push MQTT (un pulso), no por polling de /orden.
+ESTACIONES_MQTT = {"inflado01"}
+
+def publicar_activacion(caja_id, pago_id):
+    """Publica la orden de activar al equipo por MQTT (TLS 8883). El ESP
+    deduplica por pago_id. Devuelve True si el publish salió bien."""
+    if not (_mqtt_publish and MQTT_HOST and MQTT_USER and MQTT_PASS):
+        print("MQTT sin configurar (faltan env vars) — no publico")
+        return False
+    payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id)})
+    try:
+        _mqtt_publish.single(
+            topic=f"termopago/{caja_id}/cmd", payload=payload, qos=1, retain=False,
+            hostname=MQTT_HOST, port=MQTT_PORT,
+            auth={"username": MQTT_USER, "password": MQTT_PASS},
+            tls={"tls_version": ssl.PROTOCOL_TLS_CLIENT}, keepalive=15,
+            client_id="termopago-backend-pub")
+        print(f"MQTT activar -> {caja_id} (pago {pago_id})")
+        return True
+    except Exception as e:
+        print(f"Error publicando MQTT a {caja_id}: {e}")
+        return False
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
@@ -477,6 +513,12 @@ def webhook():
             dispositivo_id = order.get("external_reference", "termo_001")
             insertar_orden(f"ord_{order_id}", dispositivo_id, segundos_de(dispositivo_id), order.get("total_amount"))
             print(f"Pago QR aprobado para {dispositivo_id}")
+            # Cajas "pulso" (inflado): activar por push MQTT y marcar la orden
+            # como completada (el pulso es instantáneo; así el reembolso
+            # automático no la toca por quedar 'pendiente').
+            if dispositivo_id in ESTACIONES_MQTT:
+                if publicar_activacion(dispositivo_id, order_id):
+                    marcar_orden(f"ord_{order_id}", "completada")
             disp = get_dispositivo(dispositivo_id)
             if disp:
                 rearmar_qr(disp)  # dejar el QR listo para el próximo cliente
@@ -1328,7 +1370,99 @@ def vigilar_ordenes():
             print(f"Error en vigilancia de órdenes: {e}")
         time.sleep(60)
 
+# ─── Liveness por MQTT: leer el heartbeat que el ESP ya publica ──────
+# El ESP de las cajas "pulso" (inflado) publica cada 60s en
+# termopago/<caja>/status un heartbeat con uptime/rssi/heap/estado, y el
+# broker publica ahí el LWT "offline" si el equipo se cae de golpe.
+# Este suscriptor actualiza ultimo_poll (para /estado) y registra cortes
+# (para /cortes), SIN pedirle al ESP ningún HTTP extra.
+
+_lock_conn = None
+def _tomar_lock_suscriptor():
+    """Un solo proceso corre el suscriptor. Advisory lock de Postgres: si
+    otro worker ya lo tiene, este no arranca (evita suscriptores/cortes
+    duplicados si algún día se escala a varios workers de gunicorn)."""
+    global _lock_conn
+    try:
+        _lock_conn = get_db()
+        _lock_conn.autocommit = True
+        cur = _lock_conn.cursor()
+        cur.execute("SELECT pg_try_advisory_lock(918273645) AS ok")
+        ok = cur.fetchone()["ok"]
+        cur.close()
+        if not ok:
+            _lock_conn.close(); _lock_conn = None
+        return ok
+    except Exception as e:
+        print(f"MQTT liveness lock: {e}")
+        return False
+
+def _registrar_corte(caja, ahora, gap):
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO cortes (dispositivo_id, fin, duracion_seg) VALUES (%s,%s,%s)",
+                    (caja, ahora.isoformat(), int(gap)))
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e:
+        print(f"Error registrando corte de {caja}: {e}")
+
+def mqtt_liveness_loop():
+    if not (MQTT_HOST and MQTT_USER and MQTT_PASS):
+        print("MQTT liveness: sin credenciales, no arranco el suscriptor")
+        return
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        print("MQTT liveness: falta paho-mqtt")
+        return
+
+    # esperar el lock (si otro worker lo tiene, reintenta por si aquel muere)
+    while not _tomar_lock_suscriptor():
+        time.sleep(30)
+
+    def on_connect(client, userdata, flags, rc, *a):
+        client.subscribe("termopago/+/status", qos=1)
+        print("MQTT liveness: suscripto a termopago/+/status")
+
+    def on_message(client, userdata, msg):
+        try:
+            caja = msg.topic.split("/")[1]
+            data = _json.loads((msg.payload.decode() or "{}"))
+        except Exception:
+            return
+        disp = get_dispositivo(caja)
+        if not disp:
+            return   # caja desconocida (todavía no dada de alta)
+        # el LWT "offline" no actualiza contacto: el corte se calcula cuando
+        # vuelve el primer heartbeat "online" (gap contra el último contacto).
+        if data.get("estado") == "offline":
+            return
+        ahora = ahora_ar()
+        up = disp.get("ultimo_poll")
+        if up:
+            try:
+                gap = (ahora - datetime.fromisoformat(up)).total_seconds()
+                if gap > 90:   # se perdió más de un heartbeat -> hubo un corte
+                    _registrar_corte(caja, ahora, gap)
+            except (ValueError, TypeError):
+                pass
+        actualizar_dispositivo(caja, {"ultimo_poll": ahora.isoformat()})
+
+    client = mqtt.Client(client_id="termopago-backend-sub", clean_session=True)
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    while True:
+        try:
+            client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+            client.loop_forever()
+        except Exception as e:
+            print(f"MQTT liveness: reconectando ({e})")
+            time.sleep(10)
+
 threading.Thread(target=vigilar_ordenes, daemon=True).start()
+threading.Thread(target=mqtt_liveness_loop, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

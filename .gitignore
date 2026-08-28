@@ -5,3 +5,7 @@ __pycache__/
 ACCESOS_privado.txt
 docs/ACCESOS_privado.txt
 *_privado.txt
+
+# Secretos del firmware (headers) - repo publico
+*_privado.h
+secretos_privado.h
