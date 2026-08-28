@@ -726,6 +726,18 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
         conn.commit()
         cur.close()
         conn.close()
+    else:
+        # Ya existía: actualizar la cuenta/caja. Permite re-apuntar un dispositivo
+        # a otra cuenta de MercadoPago re-corriendo el alta con el token correcto.
+        # Limpiamos la orden vieja (era de la otra cuenta) para que rearmar_qr cree
+        # una nueva en la cuenta nueva sin intentar reconciliar la anterior.
+        actualizar_dispositivo(disp_id, {
+            "external_pos_id": external_id,
+            "token_env": token_env,
+            "cliente": cliente_alias,
+            "orden_qr_id": None,
+            "ultimo_rearme": None,
+        })
 
     disp = get_dispositivo(disp_id)
     rearmar_qr(disp)
