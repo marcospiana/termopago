@@ -485,7 +485,15 @@ def completar_orden(orden_id):
 def simular_pago(clave, segundos=10, dispositivo_id="termo_001"):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
-    insertar_orden(str(uuid.uuid4()), dispositivo_id, segundos)
+    oid = str(uuid.uuid4())
+    insertar_orden(oid, dispositivo_id, segundos)
+    # Cajas "pulso" (inflado): no pollean /orden, se activan por push MQTT.
+    # Publicamos la activacion y marcamos la orden completada (igual que el webhook).
+    if dispositivo_id in ESTACIONES_MQTT:
+        ok = publicar_activacion(dispositivo_id, oid)
+        if ok:
+            marcar_orden(oid, "completada")
+        return f"Pago simulado (MQTT) -> {dispositivo_id}: {'enviado' if ok else 'FALLO publish'}"
     return f"Pago simulado: {dispositivo_id}, {segundos} segundos"
 
 # ─── Webhook MercadoPago ─────────────────────────────────────────
