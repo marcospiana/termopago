@@ -41,10 +41,14 @@ try:
 except ImportError:
     _mqtt_publish = None
 
-MQTT_HOST = os.environ.get("MQTT_HOST")
-MQTT_PORT = int(os.environ.get("MQTT_PORT", "8883"))
-MQTT_USER = os.environ.get("MQTT_USER")
-MQTT_PASS = os.environ.get("MQTT_PASS")
+MQTT_HOST = (os.environ.get("MQTT_HOST") or "").strip() or None
+# Robusto: una variable vacía ("") no debe tumbar el arranque del backend.
+try:
+    MQTT_PORT = int((os.environ.get("MQTT_PORT") or "8883").strip() or "8883")
+except ValueError:
+    MQTT_PORT = 8883
+MQTT_USER = (os.environ.get("MQTT_USER") or "").strip() or None
+MQTT_PASS = os.environ.get("MQTT_PASS") or None
 
 # Cajas que se activan por push MQTT (un pulso), no por polling de /orden.
 ESTACIONES_MQTT = {"inflado01"}
