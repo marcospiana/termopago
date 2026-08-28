@@ -788,8 +788,14 @@ def reinicios(clave):
         return "No autorizado", 403
 
     conn = get_db(); cur = conn.cursor()
-    cur.execute("SELECT dispositivo_id, motivo, fecha FROM reinicios ORDER BY fecha ASC LIMIT 1000")
-    rows = cur.fetchall()
+    # Detalle: los MAS RECIENTES. Antes traia los mas VIEJOS (ASC LIMIT 1000) y con
+    # mas de 1000 registros los reinicios nuevos quedaban afuera y no se veian.
+    # DESC + reversed = recientes en orden cronologico (viejo->nuevo) para el gap.
+    cur.execute("SELECT dispositivo_id, motivo, fecha FROM reinicios ORDER BY fecha DESC LIMIT 400")
+    rows = list(reversed(cur.fetchall()))
+    # Resumen por causa: cuenta TODA la historia (aparte del limite del detalle).
+    cur.execute("SELECT motivo, COUNT(*) AS n FROM reinicios GROUP BY motivo")
+    conteo = cur.fetchall()
     cur.close(); conn.close()
     nombres = {d["id"]: d["nombre"] for d in get_dispositivos()}
 
@@ -816,7 +822,7 @@ def reinicios(clave):
     # tiempo activo = gap con el boot anterior del mismo equipo
     prev = {}
     eventos = []
-    resumen = {}
+    resumen = { (r["motivo"] or "desconocido"): r["n"] for r in conteo }
     for r in rows:
         did = r["dispositivo_id"]; mot = r["motivo"] or "desconocido"; f = r["fecha"] or ""
         activo = None
@@ -827,7 +833,6 @@ def reinicios(clave):
                 activo = None
         prev[did] = f
         eventos.append((f, did, mot, activo))
-        resumen[mot] = resumen.get(mot, 0) + 1
 
     filas_res = ""
     for mot, cant in sorted(resumen.items(), key=lambda x: -x[1]):

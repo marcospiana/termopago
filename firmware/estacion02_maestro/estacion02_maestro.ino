@@ -156,14 +156,22 @@ String motivoReinicio() {
 }
 
 void reportarBoot() {
-  WiFiClientSecure client; client.setInsecure();
-  HTTPClient http;
-  http.begin(client, String(BACKEND_BASE) + "/boot/" + IDS[0] + "/" + motivoReinicio());
-  http.setConnectTimeout(4000);
-  http.setTimeout(5000);
-  http.GET();
-  http.end();
-  Serial.println("Boot reportado: " + motivoReinicio());
+  String motivo = motivoReinicio();
+  // Reintenta: la 1ra llamada HTTPS recien conectado suele fallar con senal
+  // floja, y si no reintenta se pierde el reporte (por eso no se registraban).
+  for (int intento = 0; intento < 5; intento++) {
+    esp_task_wdt_reset();
+    WiFiClientSecure client; client.setInsecure();
+    HTTPClient http;
+    http.begin(client, String(BACKEND_BASE) + "/boot/" + IDS[0] + "/" + motivo);
+    http.setConnectTimeout(4000);
+    http.setTimeout(5000);
+    int code = http.GET();
+    http.end();
+    if (code == 200) { Serial.println("Boot reportado: " + motivo); return; }
+    delay(2000);
+  }
+  Serial.println("No se pudo reportar el boot (se reintento 5 veces)");
 }
 
 // ─── Setup ───────────────────────────────────────────────────────

@@ -37,8 +37,12 @@ const int   RELAY_PIN[NUM_CANALES] = {25, 26};
 // ── Clavar la conexion a la banda 2.4GHz (evita el band-steering a 5GHz). ──
 //    BSSID = MAC de la radio 2.4 de la red (sacado del escaner). Si cambias
 //    de red, actualiza estos dos valores. Para NO clavar, poner LOCK_ON 0.
-#define LOCK_ON 1
-uint8_t LOCK_BSSID[6] = {0x58, 0x56, 0xC2, 0x4A, 0x1C, 0x98};  // MEGA FIBRA-2.4G-6yEt 2.4GHz
+// LOCK_ON 0 = portable: se conecta a la red que configures por el portal, en
+//   cualquier canal (ideal para mover el equipo). Poné 1 SOLO si en algun lugar
+//   el router es doble banda con UN SOLO nombre (band-steering) y se cae — ahi
+//   actualizas LOCK_BSSID/CHANNEL con el escaner y lo clavas a esa 2.4.
+#define LOCK_ON 0
+uint8_t LOCK_BSSID[6] = {0x58, 0x56, 0xC2, 0x4A, 0x1C, 0x98};  // (sin uso con LOCK_ON 0)
 int32_t LOCK_CHANNEL  = 2;
 
 bool          activo[NUM_CANALES]  = {false, false};
@@ -163,14 +167,22 @@ String motivoReinicio() {
 }
 
 void reportarBoot() {
-  WiFiClientSecure client; client.setInsecure();
-  HTTPClient http;
-  http.begin(client, String(BACKEND_BASE) + "/boot/" + IDS[0] + "/" + motivoReinicio());
-  http.setConnectTimeout(4000);
-  http.setTimeout(5000);
-  http.GET();
-  http.end();
-  Serial.println("Boot reportado: " + motivoReinicio());
+  String motivo = motivoReinicio();
+  // Reintenta: la 1ra llamada HTTPS recien conectado suele fallar con senal
+  // floja, y si no reintenta se pierde el reporte (por eso no se registraban).
+  for (int intento = 0; intento < 5; intento++) {
+    esp_task_wdt_reset();
+    WiFiClientSecure client; client.setInsecure();
+    HTTPClient http;
+    http.begin(client, String(BACKEND_BASE) + "/boot/" + IDS[0] + "/" + motivo);
+    http.setConnectTimeout(4000);
+    http.setTimeout(5000);
+    int code = http.GET();
+    http.end();
+    if (code == 200) { Serial.println("Boot reportado: " + motivo); return; }
+    delay(2000);
+  }
+  Serial.println("No se pudo reportar el boot (se reintento 5 veces)");
 }
 
 // ─── Setup ───────────────────────────────────────────────────────
