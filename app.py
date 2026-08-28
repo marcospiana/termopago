@@ -1459,6 +1459,16 @@ def mqtt_liveness_loop():
             except (ValueError, TypeError):
                 pass
         actualizar_dispositivo(caja, {"ultimo_poll": ahora.isoformat()})
+        # Re-armar el QR si venció: las cajas MQTT no pollean /orden, así que
+        # nadie más les renueva la orden del QR (que expira a los 15 min).
+        # El heartbeat (cada 60s) lo mantiene siempre vigente.
+        try:
+            rearme = disp.get("ultimo_rearme")
+            vencido = (not rearme) or (ahora - datetime.fromisoformat(rearme)).total_seconds() > 600
+        except (ValueError, TypeError):
+            vencido = True
+        if vencido:
+            rearmar_qr(disp)
 
     client = mqtt.Client(client_id="termopago-backend-sub", clean_session=True)
     client.username_pw_set(MQTT_USER, MQTT_PASS)
