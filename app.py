@@ -1448,6 +1448,13 @@ def mqtt_liveness_loop():
         # el LWT "offline" no actualiza contacto: el corte se calcula cuando
         # vuelve el primer heartbeat "online" (gap contra el último contacto).
         if data.get("estado") == "offline":
+            # Equipo caído: cancelar la orden del QR para que NADIE pueda pagar
+            # una máquina que no va a responder. Se re-arma sola con el próximo
+            # heartbeat cuando el equipo vuelva.
+            if disp.get("orden_qr_id"):
+                cancelar_orden_qr(disp)
+                actualizar_dispositivo(caja, {"orden_qr_id": None, "ultimo_rearme": None})
+                print(f"QR de {caja} cancelado: equipo offline (LWT)")
             return
         ahora = ahora_ar()
         up = disp.get("ultimo_poll")
