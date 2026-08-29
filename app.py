@@ -50,8 +50,12 @@ except ValueError:
 MQTT_USER = (os.environ.get("MQTT_USER") or "").strip() or None
 MQTT_PASS = os.environ.get("MQTT_PASS") or None
 
-# Cajas que se activan por push MQTT (un pulso), no por polling de /orden.
-ESTACIONES_MQTT = {"inflado01"}
+# Cajas que se activan por push MQTT, no por polling de /orden.
+ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01"}
+# De esas, las de PULSO (un disparo instantaneo) se marcan completadas al toque.
+# Las demas son de servicio SOSTENIDO: se marcan 'ejecutando' con inicio, para
+# que la recuperacion tras corte de luz calcule el tiempo restante.
+ESTACIONES_PULSO = {"inflado01"}
 
 def publicar_activacion(caja_id, pago_id):
     """Publica la orden de activar al equipo por MQTT (TLS 8883). El ESP
@@ -491,12 +495,15 @@ def simular_pago(clave, segundos=10, dispositivo_id="termo_001"):
         return "No autorizado", 403
     oid = str(uuid.uuid4())
     insertar_orden(oid, dispositivo_id, segundos)
-    # Cajas "pulso" (inflado): no pollean /orden, se activan por push MQTT.
-    # Publicamos la activacion y marcamos la orden completada (igual que el webhook).
+    # Cajas MQTT: no pollean /orden, se activan por push. Pulso -> completada al
+    # toque; sostenido -> ejecutando (para calcular el restante en recuperacion).
     if dispositivo_id in ESTACIONES_MQTT:
         ok = publicar_activacion(dispositivo_id, oid)
         if ok:
-            marcar_orden(oid, "completada")
+            if dispositivo_id in ESTACIONES_PULSO:
+                marcar_orden(oid, "completada")
+            else:
+                marcar_ejecutando(oid)
         return f"Pago simulado (MQTT) -> {dispositivo_id}: {'enviado' if ok else 'FALLO publish'}"
     return f"Pago simulado: {dispositivo_id}, {segundos} segundos"
 
@@ -527,14 +534,21 @@ def webhook():
                 break
         if order.get("status") == "processed":
             dispositivo_id = order.get("external_reference", "termo_001")
-            insertar_orden(f"ord_{order_id}", dispositivo_id, segundos_de(dispositivo_id), order.get("total_amount"))
+            oid = f"ord_{order_id}"
+            insertar_orden(oid, dispositivo_id, segundos_de(dispositivo_id), order.get("total_amount"))
             print(f"Pago QR aprobado para {dispositivo_id}")
-            # Cajas "pulso" (inflado): activar por push MQTT y marcar la orden
-            # como completada (el pulso es instantáneo; así el reembolso
-            # automático no la toca por quedar 'pendiente').
+            # Cajas MQTT: activar por push. Pulso (inflado) -> completada al toque
+            # (instantaneo). Sostenido (aspiradora/soplado) -> ejecutando con
+            # inicio, para que la recuperacion tras corte calcule el restante.
+            # (El reembolso automatico solo toca 'pendiente', asi que ninguna de
+            # las dos queda en riesgo.) Se pasa el id completo de la orden para
+            # que coincida con el orden_id de /orden (dedup en el esclavo).
             if dispositivo_id in ESTACIONES_MQTT:
-                if publicar_activacion(dispositivo_id, order_id):
-                    marcar_orden(f"ord_{order_id}", "completada")
+                if publicar_activacion(dispositivo_id, oid):
+                    if dispositivo_id in ESTACIONES_PULSO:
+                        marcar_orden(oid, "completada")
+                    else:
+                        marcar_ejecutando(oid)
             disp = get_dispositivo(dispositivo_id)
             if disp:
                 rearmar_qr(disp)  # dejar el QR listo para el próximo cliente
@@ -1375,6 +1389,18 @@ def marcar_orden(orden_id, nuevo_estado, solo_si=None):
     cur.close()
     conn.close()
     return tomada
+
+def marcar_ejecutando(orden_id):
+    """Marca una orden 'ejecutando' con inicio=ahora (arranque de un servicio
+    sostenido por MQTT). Mismo efecto que hace /orden con las cajas de polling,
+    para que la recuperacion tras corte de luz calcule el tiempo restante."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE ordenes SET estado='ejecutando', inicio=%s WHERE id=%s AND estado='pendiente'",
+                (ahora_ar().isoformat(), orden_id))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 def vigilar_ordenes():
     """Cada minuto: si una orden pagada lleva más de REEMBOLSO_MINUTOS
