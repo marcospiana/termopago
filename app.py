@@ -57,16 +57,22 @@ ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01"}
 # que la recuperacion tras corte de luz calcule el tiempo restante.
 ESTACIONES_PULSO = {"inflado01"}
 
-def publicar_activacion(caja_id, pago_id):
+def publicar_activacion(caja_id, pago_id, segundos_override=None):
     """Publica la orden de activar al equipo por MQTT (TLS 8883). El ESP
-    deduplica por pago_id. Devuelve True si el publish salió bien."""
+    deduplica por pago_id. Devuelve True si el publish salió bien.
+    segundos_override: si viene (solo lo usa /simular_pago para probar), manda
+    ese tiempo en vez del de /config. En pagos reales queda None y manda el
+    tiempo configurado, que es el que vale en produccion."""
     if not (_mqtt_publish and MQTT_HOST and MQTT_USER and MQTT_PASS):
         print("MQTT sin configurar (faltan env vars) — no publico")
         return False
     # Mandamos los segundos del conteo (editables en /config) para que el ESP
     # muestre el tiempo correcto sin re-flashear.
-    disp = get_dispositivo(caja_id)
-    segundos = int(disp["segundos"]) if disp and disp.get("segundos") else 90
+    if segundos_override is not None:
+        segundos = int(segundos_override)
+    else:
+        disp = get_dispositivo(caja_id)
+        segundos = int(disp["segundos"]) if disp and disp.get("segundos") else 90
     payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "segundos": segundos})
     try:
         _mqtt_publish.single(
@@ -498,7 +504,9 @@ def simular_pago(clave, segundos=10, dispositivo_id="termo_001"):
     # Cajas MQTT: no pollean /orden, se activan por push. Pulso -> completada al
     # toque; sostenido -> ejecutando (para calcular el restante en recuperacion).
     if dispositivo_id in ESTACIONES_MQTT:
-        ok = publicar_activacion(dispositivo_id, oid)
+        # En simulacion mandamos el tiempo de la URL para poder probar distintos
+        # valores sin tocar /config. Los pagos reales usan el tiempo de config.
+        ok = publicar_activacion(dispositivo_id, oid, segundos_override=segundos)
         if ok:
             if dispositivo_id in ESTACIONES_PULSO:
                 marcar_orden(oid, "completada")
