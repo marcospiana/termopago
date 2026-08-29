@@ -59,7 +59,11 @@ def publicar_activacion(caja_id, pago_id):
     if not (_mqtt_publish and MQTT_HOST and MQTT_USER and MQTT_PASS):
         print("MQTT sin configurar (faltan env vars) — no publico")
         return False
-    payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id)})
+    # Mandamos los segundos del conteo (editables en /config) para que el ESP
+    # muestre el tiempo correcto sin re-flashear.
+    disp = get_dispositivo(caja_id)
+    segundos = int(disp["segundos"]) if disp and disp.get("segundos") else 90
+    payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "segundos": segundos})
     try:
         _mqtt_publish.single(
             topic=f"termopago/{caja_id}/cmd", payload=payload, qos=1, retain=False,
@@ -776,12 +780,17 @@ def config_panel(clave):
             cambios = []
             for disp in get_dispositivos():
                 nuevo_precio = float(request.form[f"precio__{disp['id']}"])
-                nuevos_minutos = int(request.form[f"minutos__{disp['id']}"])
-                if nuevo_precio <= 0 or nuevos_minutos <= 0:
+                # Cajas de pulso (inflado): el tiempo del conteo se edita en
+                # SEGUNDOS (es corto); las de servicio sostenido, en minutos.
+                if disp["id"] in ESTACIONES_MQTT:
+                    nuevos_segundos = int(request.form[f"segundos__{disp['id']}"])
+                else:
+                    nuevos_segundos = int(request.form[f"minutos__{disp['id']}"]) * 60
+                if nuevo_precio <= 0 or nuevos_segundos <= 0:
                     raise ValueError
                 precio_cambio = nuevo_precio != float(disp["precio"])
-                tiempo_cambio = (nuevos_minutos * 60) != int(disp["segundos"])
-                actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_minutos * 60})
+                tiempo_cambio = nuevos_segundos != int(disp["segundos"])
+                actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_segundos})
                 # re-armar el QR si cambió el precio O el tiempo (los minutos
                 # van en la descripción del QR, así queda todo consistente)
                 if precio_cambio or tiempo_cambio:
@@ -798,13 +807,18 @@ def config_panel(clave):
 
     filas = ""
     for disp in get_dispositivos():
+        if disp["id"] in ESTACIONES_MQTT:
+            campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
+                            f'<input type="number" name="segundos__{disp["id"]}" min="1" value="{int(disp["segundos"])}">')
+        else:
+            campo_tiempo = (f'<label>Tiempo (minutos)</label>'
+                            f'<input type="number" name="minutos__{disp["id"]}" min="1" value="{disp["segundos"] // 60}">')
         filas += f"""
   <fieldset>
     <legend>{disp['nombre']} <small>({disp['id']})</small></legend>
     <label>Precio (ARS)</label>
     <input type="number" name="precio__{disp['id']}" step="0.01" min="1" value="{float(disp['precio']):g}">
-    <label>Tiempo (minutos)</label>
-    <input type="number" name="minutos__{disp['id']}" min="1" value="{disp['segundos'] // 60}">
+    {campo_tiempo}
   </fieldset>"""
 
     return f"""<!doctype html>

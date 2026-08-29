@@ -120,6 +120,10 @@ String   pagoPendiente = "";
 bool     mostrandoCiclo = false;
 uint32_t cicloInicioMs  = 0;
 int      ultimoRestanteMostrado = -1;   // para refrescar el LCD solo al cambiar el segundo
+uint32_t graciasHastaMs = 0;            // hasta cuando mostrar "Listo! Gracias" antes de volver a espera
+const uint32_t GRACIAS_MS = 5000;       // 5 s el mensaje de gracias tras el servicio
+int      segundosPendiente = 0;         // segundos del conteo que mando el backend en el cmd
+int      cicloSegundos = CICLO_SEGUNDOS;// conteo actual (del server si vino, o el default)
 
 // ============================================================================
 //  LCD helpers (robustos)
@@ -165,6 +169,12 @@ void mostrar(const String& l1, const String& l2) {
   lcdLinea(0, l1);
   lcdLinea(1, l2);
   Serial.printf("[LCD] %s | %s\n", l1.c_str(), l2.c_str());
+}
+
+// Pantalla de reposo: lo que ve el cliente cuando el equipo esta listo para
+// cobrar. El texto coincide con el cartel ("la pantalla debe decir WiFi conectado").
+void pantallaEspera() {
+  mostrar("WiFi conectado", "Escanea el QR");
 }
 
 // ============================================================================
@@ -357,6 +367,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   String pagoId = String((const char*)(doc["pago_id"] | ""));
   if (strcmp(accion, "activar") != 0 || pagoId.length() == 0) return;
 
+  // segundos del conteo (editable desde /config del backend); si no viene, usa el default
+  segundosPendiente = (int)(doc["segundos"] | (int)CICLO_SEGUNDOS);
+
   // marcamos el pedido; el pulso se ejecuta en loop() (fuera del callback)
   pagoPendiente = pagoId;
   pedidoActivar = true;
@@ -373,7 +386,7 @@ boolean mqttConectar() {
     mqtt.subscribe(TOPIC_CMD, 1);          // QoS 1
     publicarEstado("online", true);        // retenido: el backend ve el ultimo estado
     ultimoMqttOk = millis();
-    mostrar("MQTT OK " CAJA_ID, "esperando pago");
+    if (!mostrandoCiclo) pantallaEspera();   // pantalla de reposo para el cliente
   } else {
     Serial.printf("[MQTT] fallo conexion, rc=%d\n", mqtt.state());
   }
@@ -426,6 +439,7 @@ void darPulso(const String& pagoId) {
 
   // ack por status + arranca el conteo estetico
   publicarEstado("online", true);
+  cicloSegundos  = (segundosPendiente > 0) ? segundosPendiente : CICLO_SEGUNDOS;  // del server o default
   mostrandoCiclo = true;
   cicloInicioMs  = millis();
   ultimoRestanteMostrado = -1;   // fuerza el primer refresco del conteo
@@ -437,13 +451,14 @@ void darPulso(const String& pagoId) {
 void actualizarDisplayCiclo() {
   if (!mostrandoCiclo) return;
   uint32_t transcurrido = (millis() - cicloInicioMs) / 1000;
-  if (transcurrido >= CICLO_SEGUNDOS) {
+  if (transcurrido >= (uint32_t)cicloSegundos) {
     mostrandoCiclo = false;
     ultimoRestanteMostrado = -1;
-    mostrar("Listo!", "Gracias " CAJA_ID);
+    mostrar("Listo!", "Gracias!");
+    graciasHastaMs = millis() + GRACIAS_MS;   // luego vuelve a "Escanea el QR"
     return;
   }
-  int restante = CICLO_SEGUNDOS - (int)transcurrido;
+  int restante = cicloSegundos - (int)transcurrido;
   if (restante == ultimoRestanteMostrado) return;   // solo refresca cuando cambia el segundo
   ultimoRestanteMostrado = restante;
   char l2[17];
@@ -516,10 +531,19 @@ void loop() {
   if (millis() - ultimoHeartbeat >= HEARTBEAT_MS) {
     ultimoHeartbeat = millis();
     publicarEstado("online", true);
+    // reasegurar la pantalla de reposo si estamos ociosos (recupera la pantalla
+    // tras mensajes transitorios como "reconectando")
+    if (!mostrandoCiclo && graciasHastaMs == 0 && mqtt.connected()) pantallaEspera();
   }
 
   // ---- conteo estetico del ciclo ----
   if (mostrandoCiclo) actualizarDisplayCiclo();
+
+  // ---- volver a la pantalla de espera tras el mensaje de "gracias" ----
+  if (!mostrandoCiclo && graciasHastaMs && millis() >= graciasHastaMs) {
+    graciasHastaMs = 0;
+    pantallaEspera();
+  }
 
   // ---- reinicio por "sin comunicacion" (MQTT caido > 90 s) ----
   if (millis() - ultimoMqttOk > SIN_COMM_TIMEOUT) {
