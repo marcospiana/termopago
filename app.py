@@ -57,6 +57,15 @@ ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01"}
 # que la recuperacion tras corte de luz calcule el tiempo restante.
 ESTACIONES_PULSO = {"inflado01"}
 
+# Cajas que comparten un mismo ESP fisico: si una se cae, estan TODAS caidas.
+# Se usa para cancelar los QR de todas cuando el equipo se va offline.
+GRUPOS_ESP = [{"aspiradora01", "soplado01"}]
+def cajas_hermanas(caja):
+    for g in GRUPOS_ESP:
+        if caja in g:
+            return g
+    return {caja}
+
 def publicar_activacion(caja_id, pago_id, segundos_override=None):
     """Publica la orden de activar al equipo por MQTT (TLS 8883). El ESP
     deduplica por pago_id. Devuelve True si el publish salió bien.
@@ -1508,13 +1517,16 @@ def mqtt_liveness_loop():
         # el LWT "offline" no actualiza contacto: el corte se calcula cuando
         # vuelve el primer heartbeat "online" (gap contra el último contacto).
         if data.get("estado") == "offline":
-            # Equipo caído: cancelar la orden del QR para que NADIE pueda pagar
-            # una máquina que no va a responder. Se re-arma sola con el próximo
-            # heartbeat cuando el equipo vuelva.
-            if disp.get("orden_qr_id"):
-                cancelar_orden_qr(disp)
-                actualizar_dispositivo(caja, {"orden_qr_id": None, "ultimo_rearme": None})
-                print(f"QR de {caja} cancelado: equipo offline (LWT)")
+            # Equipo caído: cancelar el QR de TODAS las cajas de ese ESP para que
+            # NADIE pueda pagar una máquina que no va a responder (aunque el LWT
+            # llegue por una sola caja, el ESP es el mismo -> caen todas). Cada
+            # una se re-arma sola con su próximo heartbeat cuando el equipo vuelva.
+            for hid in cajas_hermanas(caja):
+                hdisp = disp if hid == caja else get_dispositivo(hid)
+                if hdisp and hdisp.get("orden_qr_id"):
+                    cancelar_orden_qr(hdisp)
+                    actualizar_dispositivo(hid, {"orden_qr_id": None, "ultimo_rearme": None})
+                    print(f"QR de {hid} cancelado: equipo offline (LWT de {caja})")
             return
         ahora = ahora_ar()
         up = disp.get("ultimo_poll")
