@@ -389,9 +389,12 @@ def rearmar_qr(disp):
             actualizar_dispositivo(disp["id"], {"orden_qr_id": r.json().get("id", ""), "ultimo_rearme": ahora})
             print(f"QR re-armado: {disp['id']}")
         else:
-            # si ya hay orden activa, registrar el intento para no insistir
-            actualizar_dispositivo(disp["id"], {"ultimo_rearme": ahora})
-            print(f"Re-arme {disp['id']}: {r.status_code} {r.text[:200]}")
+            # No se pudo crear la orden nueva. Para cuando llegamos aca la anterior
+            # ya fue pagada o cancelada, o sea NO hay QR pagable. Marcamos el QR como
+            # muerto (orden_qr_id=None, ultimo_rearme=None) para que el proximo
+            # heartbeat (60s) REINTENTE enseguida, en vez de dejarlo roto 10 min.
+            actualizar_dispositivo(disp["id"], {"orden_qr_id": None, "ultimo_rearme": None})
+            print(f"Re-arme {disp['id']} FALLO ({r.status_code}): {r.text[:200]} -> reintenta al proximo heartbeat")
     except Exception as e:
         print(f"Error re-armando QR de {disp['id']}: {e}")
 
