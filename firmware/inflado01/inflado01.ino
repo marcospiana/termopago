@@ -112,9 +112,14 @@ uint32_t ultimoIntentoMqtt = 0;
 uint32_t ultimoLcdReinit= 0;
 uint32_t pulsosTotales  = 0;
 
-String   ultimoPagoProcesado = "";   // dedup (se persiste en NVS)
-volatile bool  pedidoActivar = false;
-String   pagoPendiente = "";
+String   ultimoPagoProcesado = "";   // dedup (se persiste en NVS): ultimo pago que ARRANCO
+
+// Cola de pagos: si entra un pago mientras hay un servicio en curso, espera su
+// turno y se activa al terminar (asi no se pierden servicios).
+#define  MAX_COLA 5
+String   colaPagos[MAX_COLA];
+int      colaSegundos[MAX_COLA];
+int      colaLen = 0;
 
 // display de conteo estetico
 bool     mostrandoCiclo = false;
@@ -354,6 +359,24 @@ void publicarEstado(const char* estado, bool retained) {
   Serial.printf("[MQTT] status -> %s\n", p.c_str());
 }
 
+// encola un pago para activarlo cuando el equipo este libre (con dedup)
+void encolarPago(const String& pagoId, int seg) {
+  if (pagoId == ultimoPagoProcesado) {                 // ya se sirvio / esta corriendo
+    Serial.printf("[COLA] %s ya procesado, ignoro\n", pagoId.c_str());
+    return;
+  }
+  for (int i = 0; i < colaLen; i++)                    // ya esta esperando en la cola
+    if (colaPagos[i] == pagoId) {
+      Serial.printf("[COLA] %s ya en cola, ignoro\n", pagoId.c_str());
+      return;
+    }
+  if (colaLen >= MAX_COLA) { Serial.println("[COLA] llena, descarto"); return; }
+  colaPagos[colaLen]    = pagoId;
+  colaSegundos[colaLen] = seg;
+  colaLen++;
+  Serial.printf("[COLA] encolado %s (%ds). En cola: %d\n", pagoId.c_str(), seg, colaLen);
+}
+
 // callback: llega orden de activar
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
   String msg; msg.reserve(len);
@@ -368,11 +391,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   if (strcmp(accion, "activar") != 0 || pagoId.length() == 0) return;
 
   // segundos del conteo (editable desde /config del backend); si no viene, usa el default
-  segundosPendiente = (int)(doc["segundos"] | (int)CICLO_SEGUNDOS);
+  int seg = (int)(doc["segundos"] | (int)CICLO_SEGUNDOS);
 
-  // marcamos el pedido; el pulso se ejecuta en loop() (fuera del callback)
-  pagoPendiente = pagoId;
-  pedidoActivar = true;
+  // a la cola: si esta inflando, espera su turno; el loop lo activa al quedar libre
+  encolarPago(pagoId, seg);
 }
 
 boolean mqttConectar() {
@@ -519,10 +541,15 @@ void loop() {
   asegurarMqtt();
   mqtt.loop();
 
-  // ---- ejecutar pulso pedido (fuera del callback) ----
-  if (pedidoActivar) {
-    pedidoActivar = false;
-    String p = pagoPendiente;
+  // ---- activar el proximo pago de la cola cuando el equipo esta libre ----
+  if (!mostrandoCiclo && graciasHastaMs == 0 && colaLen > 0) {
+    String p          = colaPagos[0];
+    segundosPendiente = colaSegundos[0];
+    for (int i = 1; i < colaLen; i++) {   // desplazar la cola (FIFO)
+      colaPagos[i-1]    = colaPagos[i];
+      colaSegundos[i-1] = colaSegundos[i];
+    }
+    colaLen--;
     darPulso(p);
     prefs.putUInt("pulsos", pulsosTotales);
   }
@@ -546,7 +573,9 @@ void loop() {
   }
 
   // ---- reinicio por "sin comunicacion" (MQTT caido > 90 s) ----
-  if (millis() - ultimoMqttOk > SIN_COMM_TIMEOUT) {
+  // NO reinicia durante un servicio: espera a que termine el conteo (el pulso ya
+  // salio y la maquina corre sola; reiniciar solo perderia el display y la cola).
+  if (!mostrandoCiclo && (millis() - ultimoMqttOk > SIN_COMM_TIMEOUT)) {
     Serial.println("[SIN COMM] broker inalcanzable > 90 s -> reinicio");
     mostrar("Sin broker", "reiniciando");
     delay(500);
@@ -569,8 +598,11 @@ void loop() {
 #endif
 
   // ---- chequeo de heap ----
-  if (ESP.getFreeHeap() < 20000) {
-    Serial.printf("[HEAP] bajo: %u -> reinicio preventivo\n", ESP.getFreeHeap());
+  // El umbral blando (20k) espera a que termine el servicio; solo un OOM critico
+  // (<10k) reinicia igual en pleno conteo para no colgarse.
+  uint32_t heapLibre = ESP.getFreeHeap();
+  if ((heapLibre < 20000 && !mostrandoCiclo) || heapLibre < 10000) {
+    Serial.printf("[HEAP] bajo: %u -> reinicio preventivo\n", heapLibre);
     delay(200);
     ESP.restart();
   }
