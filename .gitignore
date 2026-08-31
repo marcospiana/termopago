@@ -9,3 +9,6 @@ docs/ACCESOS_privado.txt
 # Secretos del firmware (headers) - repo publico
 *_privado.h
 secretos_privado.h
+
+# Notas/contexto personal (tiene host del broker e inventario de cuentas) - repo publico
+TERMOPAGO_CONTEXTO.txt

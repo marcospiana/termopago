@@ -22,7 +22,7 @@
 
 const char* BACKEND_BASE  = "https://web-production-94bbab.up.railway.app";
 const int   WDT_TIMEOUT_S = 30;   // si el loop se cuelga 30s, el watchdog reinicia
-const unsigned long INTERVALO_POLL_MS = 3000;
+const unsigned long INTERVALO_POLL_MS = 4000;   // 4s: menos HTTPS = menos fragmentacion de RAM
 
 const int NUM_CANALES = 2;
 const char* IDS[NUM_CANALES]     = {"aspiradora01", "soplado01"};
@@ -271,6 +271,14 @@ void loop() {
   }
   if (!activo[0] && !activo[1] && ESP.getFreeHeap() < 40000) {
     Serial.println("Heap bajo, reiniciando..."); delay(200); ESP.restart();
+  }
+  // Reinicio PREVENTIVO cada 6h (en reposo): reinicio limpio y previsible que
+  // limpia la fragmentacion de RAM antes de que cause un cuelgue. Mejor un
+  // reinicio programado que uno al azar. No corta servicio (lo tiene el esclavo).
+  if (!activo[0] && !activo[1] && millis() - bootMs > 21600000UL) {
+    Serial.println("Reinicio preventivo (6h), limpiando RAM...");
+    mostrar("Mantenimiento", "Reiniciando...");
+    delay(300); ESP.restart();
   }
 
   // 1. Timer PARALELO (solo para confirmar /completar y no re-pollear el canal

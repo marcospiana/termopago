@@ -378,11 +378,13 @@ void loop() {
   // Heartbeat cada 60s (los dos canales)
   if (millis() - ultimoHeartbeat >= HEARTBEAT_MS) { ultimoHeartbeat = millis(); publicarEstado("online"); }
 
-  // Display de reposo cada 1s (el esclavo dibuja su propio contador en servicio)
+  // Keepalive al esclavo cada 1s: mantiene vivo el enlace (evita el "Sin datos"
+  // al terminar el servicio) y refresca el texto de reposo. Durante el servicio
+  // el esclavo dibuja su propio contador e IGNORA este texto, pero igual mantiene
+  // el enlace fresco -> al terminar muestra el reposo al toque.
   if (millis() - ultimoLcdMs >= 1000) {
     ultimoLcdMs = millis();
-    if (!activo[0] && !activo[1])
-      mostrar(mqtt.connected() ? "WiFi conectado!" : "Conectando...", mqtt.connected() ? "Escanee el QR" : "al servidor...");
+    mostrar(mqtt.connected() ? "WiFi conectado!" : "Conectando...", mqtt.connected() ? "Escanee el QR" : "al servidor...");
   }
 
   delay(20);
