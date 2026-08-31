@@ -33,6 +33,14 @@ FEE_PORCENTAJE   = float(os.environ.get("FEE_PORCENTAJE", "0"))  # tu comisión,
 # el equipo (offline) la ejecute, antes de devolverle el dinero al cliente
 REEMBOLSO_MINUTOS = int(os.environ.get("REEMBOLSO_MINUTOS", "5"))
 
+# ── Alertas por Telegram (equipo caido) ──
+# Se setean en Railway (Variables). Sin ellas, las alertas no arrancan.
+TELEGRAM_TOKEN   = (os.environ.get("TELEGRAM_TOKEN") or "").strip() or None
+TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip() or None
+# Sin latido por mas de esto (seg) -> se considera caido y avisa. 180 = 3 min
+# (3 latidos perdidos) para no dar falsas alarmas por un latido salteado.
+ALERTA_OFFLINE_S = int((os.environ.get("ALERTA_OFFLINE_S") or "180").strip() or "180")
+
 # ─── MQTT: activación push de cajas tipo "pulso" (ej. inflado) ───────
 import ssl
 import json as _json
@@ -1565,8 +1573,80 @@ def mqtt_liveness_loop():
             print(f"MQTT liveness: reconectando ({e})")
             time.sleep(10)
 
+# ─── Alertas por Telegram: avisar cuando un equipo se cae / vuelve ───
+_alerta_estado = {}   # caja -> True si ya avisamos que esta caida
+
+def enviar_telegram(texto):
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "HTML"},
+            timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram {r.status_code}: {r.text[:200]}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"Telegram error: {e}")
+        return False
+
+def vigilar_equipos():
+    """Cada minuto revisa el ultimo_poll de las cajas MQTT. Avisa por Telegram
+    cuando un equipo lleva mas de ALERTA_OFFLINE_S sin latido (se cayo) y cuando
+    vuelve. Estado en memoria para no repetir el aviso. Un solo proceso corre
+    esto (advisory lock 918273646)."""
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+        print("Alertas: sin TELEGRAM_TOKEN/CHAT_ID -> no arranco el vigilante de equipos")
+        return
+    try:
+        lock = get_db(); lock.autocommit = True
+        c = lock.cursor(); c.execute("SELECT pg_try_advisory_lock(918273646) AS ok")
+        got = c.fetchone()["ok"]; c.close()
+        if not got:
+            lock.close(); return
+    except Exception as e:
+        print(f"Alertas lock: {e}"); return
+    time.sleep(90)   # margen al arranque para no avisar durante un deploy/boot
+    while True:
+        try:
+            ahora = ahora_ar()
+            for caja in ESTACIONES_MQTT:
+                disp = get_dispositivo(caja)
+                if not disp:
+                    continue
+                up = disp.get("ultimo_poll")
+                if not up:
+                    continue   # nunca conecto: no alertamos
+                try:
+                    gap = (ahora - datetime.fromisoformat(up)).total_seconds()
+                except (ValueError, TypeError):
+                    continue
+                caido = gap > ALERTA_OFFLINE_S
+                ya = _alerta_estado.get(caja, False)
+                nombre = disp.get("nombre") or caja
+                if caido and not ya:
+                    _alerta_estado[caja] = True
+                    enviar_telegram(f"\U0001F534 <b>{nombre}</b> se cayo.\nSin conexion hace {int(gap//60)} min. Los QR de ese equipo no cobran hasta que vuelva.")
+                elif (not caido) and ya and gap < 90:
+                    _alerta_estado[caja] = False
+                    enviar_telegram(f"\U0001F7E2 <b>{nombre}</b> volvio a estar online.")
+        except Exception as e:
+            print(f"Error en vigilancia de equipos: {e}")
+        time.sleep(60)
+
+@app.route("/probar_telegram/<clave>")
+def probar_telegram(clave):
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+        return "Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Railway", 400
+    ok = enviar_telegram("\u2705 Prueba de TermoPago: las alertas por Telegram funcionan.")
+    return ("Enviado, fijate el Telegram" if ok else "Fallo el envio, revisa token/chat_id"), (200 if ok else 500)
+
 threading.Thread(target=vigilar_ordenes, daemon=True).start()
 threading.Thread(target=mqtt_liveness_loop, daemon=True).start()
+threading.Thread(target=vigilar_equipos, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
