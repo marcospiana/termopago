@@ -419,6 +419,20 @@ def landing():
     except FileNotFoundError:
         return "TermoPago", 200
 
+@app.route("/health")
+def health():
+    """Chequeo para monitoreo externo (UptimeRobot). Devuelve 200 solo si el
+    backend Y la base responden. Si la DB esta caida -> 503 -> el monitor avisa.
+    Publico y liviano (SELECT 1), sin datos sensibles."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone(); cur.close(); conn.close()
+        return "ok", 200
+    except Exception as e:
+        print(f"/health FALLO: {e}")
+        return "db-error", 503
+
 @app.route("/logo/<path:archivo>")
 def logo_static(archivo):
     from flask import send_from_directory
