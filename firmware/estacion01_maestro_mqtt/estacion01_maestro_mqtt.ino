@@ -32,6 +32,8 @@
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include "secretos_privado.h"   // MQTT_HOST/PORT/USER/PASS, BACKEND_HOST
+#include <time.h>              // configTime/time() para validar el cert TLS
+#include "ca_hivemq.h"        // raices CA de Lets Encrypt (ISRG X1/X2)
 
 // ── Canales de esta estacion ──────────────────────────────────────
 const int   NUM_CANALES = 2;
@@ -301,6 +303,20 @@ void ventanaResetWiFi() {
 }
 
 // ─── Setup ────────────────────────────────────────────────────────
+// -- Hora por NTP: necesaria para validar el certificado TLS del broker.
+// Si no la conseguimos, el que llama cae a setInsecure() para NO dejar el
+// equipo sin conectar por un problema de reloj. Alimenta el watchdog mientras
+// espera. Devuelve true si consiguio hora real (epoch > nov-2023).
+bool sincronizarHora() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  unsigned long t0 = millis();
+  while (time(nullptr) < 1700000000UL && millis() - t0 < 10000) {
+    delay(200);
+    watchdogFeed();
+  }
+  return time(nullptr) > 1700000000UL;
+}
+
 void setup() {
   Serial.begin(115200);
   Serial2.begin(9600, SERIAL_8N1, LINK_RX, LINK_TX);   // enlace al esclavo Nano
@@ -313,7 +329,16 @@ void setup() {
   reportarBoot();
 
   // MQTT sobre TLS
-  espClient.setInsecure();  // TALLER: sin pin de CA. Produccion: setCACert(ISRG Root X1).
+  // TLS del broker: si tenemos hora, validamos el certificado (setCACert con
+  // las raices ISRG X1/X2). Si NO hay hora (NTP caido), caemos a setInsecure()
+  // para que el equipo se conecte igual -> el endurecimiento nunca lo aisla.
+  if (sincronizarHora()) {
+    espClient.setCACert(HIVEMQ_CA_BUNDLE);
+    Serial.println("[TLS] hora OK -> valido el certificado del broker");
+  } else {
+    espClient.setInsecure();
+    Serial.println("[TLS] sin hora NTP -> setInsecure (degradado, pero conecta)");
+  }
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
   mqtt.setBufferSize(512);

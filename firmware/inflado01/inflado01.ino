@@ -47,6 +47,8 @@
 
 // ---- Secretos (NO se commitea) ----
 #include "secretos_privado.h"
+#include <time.h>              // configTime/time() para validar el cert TLS
+#include "ca_hivemq.h"        // raices CA de Lets Encrypt (ISRG X1/X2)
 /*  secretos_privado.h debe definir:
       #define MQTT_HOST     "xxxxx.s1.eu.hivemq.cloud"
       #define MQTT_PORT     8883
@@ -491,6 +493,20 @@ void actualizarDisplayCiclo() {
 // ============================================================================
 //  SETUP
 // ============================================================================
+// -- Hora por NTP: necesaria para validar el certificado TLS del broker.
+// Si no la conseguimos, el que llama cae a setInsecure() para NO dejar el
+// equipo sin conectar por un problema de reloj. Alimenta el watchdog mientras
+// espera. Devuelve true si consiguio hora real (epoch > nov-2023).
+bool sincronizarHora() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  unsigned long t0 = millis();
+  while (time(nullptr) < 1700000000UL && millis() - t0 < 10000) {
+    delay(200);
+    watchdogFeed();
+  }
+  return time(nullptr) > 1700000000UL;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -519,7 +535,16 @@ void setup() {
   reportarBoot();                 // registra el motivo del ultimo reinicio
 
   // MQTT sobre TLS
-  espClient.setInsecure();        // TALLER: sin pin de CA. PRODUCCION: ver nota de setCACert abajo.
+  // TLS del broker: si tenemos hora, validamos el certificado (setCACert con
+  // las raices ISRG X1/X2). Si NO hay hora (NTP caido), caemos a setInsecure()
+  // para que el equipo se conecte igual -> el endurecimiento nunca lo aisla.
+  if (sincronizarHora()) {
+    espClient.setCACert(HIVEMQ_CA_BUNDLE);
+    Serial.println("[TLS] hora OK -> valido el certificado del broker");
+  } else {
+    espClient.setInsecure();
+    Serial.println("[TLS] sin hora NTP -> setInsecure (degradado, pero conecta)");
+  }
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
   mqtt.setBufferSize(512);        // JSON + TLS: subir el buffer (default 256 es justo)
@@ -611,16 +636,11 @@ void loop() {
 }
 
 /*  ============================================================================
-    NOTA TLS PRODUCCION:
-    Para la instalacion final, en vez de espClient.setInsecure(), piná la CA
-    raiz de HiveMQ Cloud (Let's Encrypt ISRG Root X1):
-
-      static const char* ISRG_ROOT_X1 = R"EOF(
-      -----BEGIN CERTIFICATE-----
-      ...ISRG Root X1...
-      -----END CERTIFICATE-----
-      )EOF";
-      espClient.setCACert(ISRG_ROOT_X1);
-
-    Para la semana de taller, setInsecure() alcanza y evita problemas de reloj.
+    NOTA TLS: YA IMPLEMENTADO (ver setup()).
+    El TLS del broker esta endurecido: se sincroniza la hora por NTP y se valida
+    el certificado con las raices de Let's Encrypt (ca_hivemq.h: ISRG X1 + X2)
+    via espClient.setCACert(HIVEMQ_CA_BUNDLE). Si el NTP falla, cae a
+    setInsecure() para no dejar el equipo sin conectar (endurecimiento best-effort).
+    El reporte de boot al backend (Railway) sigue en setInsecure() a proposito:
+    apunta a otra CA distinta y no es un canal critico.
     ============================================================================ */
