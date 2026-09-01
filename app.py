@@ -59,7 +59,7 @@ MQTT_USER = (os.environ.get("MQTT_USER") or "").strip() or None
 MQTT_PASS = os.environ.get("MQTT_PASS") or None
 
 # Cajas que se activan por push MQTT, no por polling de /orden.
-ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01"}
+ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01", "aspiradora02", "soplado02"}
 # De esas, las de PULSO (un disparo instantaneo) se marcan completadas al toque.
 # Las demas son de servicio SOSTENIDO: se marcan 'ejecutando' con inicio, para
 # que la recuperacion tras corte de luz calcule el tiempo restante.
@@ -67,7 +67,7 @@ ESTACIONES_PULSO = {"inflado01"}
 
 # Cajas que comparten un mismo ESP fisico: si una se cae, estan TODAS caidas.
 # Se usa para cancelar los QR de todas cuando el equipo se va offline.
-GRUPOS_ESP = [{"aspiradora01", "soplado01"}]
+GRUPOS_ESP = [{"aspiradora01", "soplado01"}, {"aspiradora02", "soplado02"}]
 def cajas_hermanas(caja):
     for g in GRUPOS_ESP:
         if caja in g:
