@@ -855,6 +855,23 @@ def diag_caja(clave, disp_id):
                 out["orden"] = {"http": r.status_code, "resp": r.text[:300]}
         except Exception as e:
             out["orden"] = f"error: {e}"
+    # 3) pagos recientes de esta caja (para detectar uno trabado "en proceso")
+    try:
+        r = requests.get("https://api.mercadopago.com/v1/payments/search",
+                         params={"external_reference": disp_id, "sort": "date_created", "criteria": "desc", "limit": 10},
+                         headers=mp_headers(tok), timeout=10)
+        if r.status_code == 200:
+            res = r.json().get("results", [])
+            out["pagos_recientes"] = [
+                {"id": x.get("id"), "status": x.get("status"),
+                 "status_detail": x.get("status_detail"),
+                 "amount": x.get("transaction_amount"),
+                 "date": x.get("date_created")} for x in res
+            ]
+        else:
+            out["pagos_recientes"] = {"http": r.status_code, "resp": r.text[:300]}
+    except Exception as e:
+        out["pagos_recientes"] = f"error: {e}"
     return jsonify(out)
 
 @app.route("/rearmar/<clave>/<disp_id>")
