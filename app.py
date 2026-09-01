@@ -1562,6 +1562,12 @@ def mqtt_liveness_loop():
         # el LWT "offline" no actualiza contacto: el corte se calcula cuando
         # vuelve el primer heartbeat "online" (gap contra el último contacto).
         if data.get("estado") == "offline":
+            # Un "offline" RETENIDO (msg.retain=1) es una RE-ENTREGA vieja que el
+            # broker manda cuando el backend se re-suscribe, NO un corte en vivo.
+            # Ignorarlo: si no, re-cancela el QR de la caja del will (IDS[0], ej
+            # aspiradora02) en cada reconexion. Un corte real llega con retain=0.
+            if getattr(msg, "retain", False):
+                return
             # Equipo caído: cancelar el QR de TODAS las cajas de ese ESP para que
             # NADIE pueda pagar una máquina que no va a responder (aunque el LWT
             # llegue por una sola caja, el ESP es el mismo -> caen todas). Cada
