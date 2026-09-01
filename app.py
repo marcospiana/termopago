@@ -1591,7 +1591,10 @@ def mqtt_liveness_loop():
             vencido = (not rearme) or (ahora - datetime.fromisoformat(rearme)).total_seconds() > 600
         except (ValueError, TypeError):
             vencido = True
-        if vencido:
+        # Re-armar si vencio por tiempo O si el QR quedo cancelado (orden_qr_id
+        # vacio, tipico tras un "offline"): asi vuelve al toque con el primer
+        # heartbeat online, sin esperar los 10 min del vencimiento.
+        if vencido or not disp.get("orden_qr_id"):
             rearmar_qr(disp)
 
     client = mqtt.Client(client_id="termopago-backend-sub", clean_session=True)
