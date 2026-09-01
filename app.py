@@ -812,6 +812,51 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
         "nota": f"Precio y tiempo se ajustan en /config (por defecto $500 / 5 min)"
     })
 
+@app.route("/diag_caja/<clave>/<disp_id>")
+def diag_caja(clave, disp_id):
+    """Diagnostico: para un dispositivo, muestra a que CAJA MP (numerica)
+    corresponde su external_pos_id, y el estado de su orden actual. Sirve para
+    detectar si el QR fisico (una caja) no coincide con la caja donde el backend
+    carga la orden."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    disp = get_dispositivo(disp_id)
+    if not disp:
+        return jsonify({"error": "no existe"}), 404
+    tok = token_de(disp)
+    out = {"disp": disp_id, "external_pos_id": disp.get("external_pos_id"),
+           "token_env": disp.get("token_env"), "orden_qr_id": disp.get("orden_qr_id")}
+    # 1) POS que matchean ese external_id en esa cuenta
+    try:
+        r = requests.get("https://api.mercadopago.com/pos",
+                         params={"external_id": disp.get("external_pos_id")},
+                         headers=mp_headers(tok), timeout=10)
+        pos = r.json().get("results", []) if r.status_code == 200 else r.text
+        out["pos_por_external_id"] = [
+            {"id": x.get("id"), "name": x.get("name"),
+             "external_id": x.get("external_id"),
+             "qr_image": (x.get("qr") or {}).get("image")} for x in pos
+        ] if isinstance(pos, list) else pos
+    except Exception as e:
+        out["pos_por_external_id"] = f"error: {e}"
+    # 2) estado de la orden actual
+    if disp.get("orden_qr_id"):
+        try:
+            r = requests.get(f"https://api.mercadopago.com/v1/orders/{disp['orden_qr_id']}",
+                             headers=mp_headers(tok), timeout=10)
+            if r.status_code == 200:
+                o = r.json()
+                out["orden"] = {"status": o.get("status"),
+                                "total_amount": o.get("total_amount"),
+                                "external_reference": o.get("external_reference"),
+                                "external_pos_id": ((o.get("config") or {}).get("qr") or {}).get("external_pos_id"),
+                                "expiration_time": o.get("expiration_time")}
+            else:
+                out["orden"] = {"http": r.status_code, "resp": r.text[:300]}
+        except Exception as e:
+            out["orden"] = f"error: {e}"
+    return jsonify(out)
+
 @app.route("/rearmar/<clave>/<disp_id>")
 def rearmar_manual(clave, disp_id):
     if clave != CLAVE_SECRETA:
