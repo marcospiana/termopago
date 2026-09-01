@@ -915,6 +915,26 @@ def boot(dispositivo_id, motivo):
     return "ok"
 
 
+@app.route("/reinicios_reset/<clave>")
+@app.route("/reinicios_reset/<clave>/<dispositivo_id>")
+def reinicios_reset(clave, dispositivo_id=None):
+    """Borra el historial de reinicios para arrancar de cero (util despues de
+    flasheos/pruebas). Con <dispositivo_id> borra solo esa caja; sin el, todas."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    conn = get_db(); cur = conn.cursor()
+    if dispositivo_id:
+        cur.execute("SELECT COUNT(*) AS n FROM reinicios WHERE dispositivo_id=%s", (dispositivo_id,))
+        n = cur.fetchone()["n"]
+        cur.execute("DELETE FROM reinicios WHERE dispositivo_id=%s", (dispositivo_id,))
+    else:
+        cur.execute("SELECT COUNT(*) AS n FROM reinicios")
+        n = cur.fetchone()["n"]
+        cur.execute("DELETE FROM reinicios")
+    conn.commit(); cur.close(); conn.close()
+    destino = dispositivo_id if dispositivo_id else "TODAS las cajas"
+    return f"Historial de reinicios borrado ({n} registros) de {destino}. La pagina arranca de cero."
+
 @app.route("/reinicios/<clave>")
 def reinicios(clave):
     """Historial de reinicios del ESP con la causa y cuánto estuvo activo antes
