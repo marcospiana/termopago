@@ -835,6 +835,7 @@ def diag_caja(clave, disp_id):
         out["pos_por_external_id"] = [
             {"id": x.get("id"), "name": x.get("name"),
              "external_id": x.get("external_id"),
+             "store_id": x.get("store_id"),
              "qr_image": (x.get("qr") or {}).get("image")} for x in pos
         ] if isinstance(pos, list) else pos
     except Exception as e:
