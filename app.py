@@ -345,6 +345,38 @@ def cancelar_orden_qr(disp):
     except Exception as e:
         print(f"Error cancelando orden de {disp['id']}: {e}")
 
+_user_id_cache = {}
+def user_id_de(token):
+    """user_id (collector) de la cuenta MP de ese token. Cacheado. Necesario
+    para el endpoint Instore que limpia la orden de la caja."""
+    if not token:
+        return None
+    if token in _user_id_cache:
+        return _user_id_cache[token]
+    try:
+        r = requests.get("https://api.mercadopago.com/users/me", headers=mp_headers(token), timeout=10)
+        if r.status_code == 200:
+            uid = r.json().get("id")
+            _user_id_cache[token] = uid
+            return uid
+    except Exception as e:
+        print(f"user_id_de error: {e}")
+    return None
+
+def limpiar_orden_caja(disp):
+    """Borra la orden que quedo pegada en la caja de MP (Instore DELETE). Tras un
+    pago, la orden pagada sigue asociada al QR y muestra 'el cobro se esta
+    registrando'; hay que eliminarla para que la caja acepte pagos nuevos."""
+    try:
+        uid = user_id_de(token_de(disp))
+        pos = disp.get("external_pos_id")
+        if uid and pos:
+            r = requests.delete(f"https://api.mercadopago.com/mpmobile/instore/qr/{uid}/{pos}",
+                                headers=mp_headers(token_de(disp)), timeout=10)
+            print(f"Limpieza caja {disp['id']}: {r.status_code}")
+    except Exception as e:
+        print(f"Limpieza caja {disp.get('id')}: {e}")
+
 def rearmar_qr(disp):
     """Carga la orden al QR de la caja del dispositivo, con su precio.
     Antes verifica si la orden anterior fue pagada sin que llegara el
@@ -391,6 +423,9 @@ def rearmar_qr(disp):
     if disp.get("cliente") and FEE_PORCENTAJE > 0:
         orden["marketplace_fee"] = f"{float(disp['precio']) * FEE_PORCENTAJE / 100:.2f}"
     ahora = ahora_ar().isoformat()
+    # Limpiar la orden vieja pegada en la caja (si no, tras un pago el QR queda
+    # en "registrando" y no acepta pagos nuevos aunque creemos una orden nueva).
+    limpiar_orden_caja(disp)
     try:
         r = requests.post("https://api.mercadopago.com/v1/orders", json=orden, headers=headers, timeout=10)
         if r.status_code == 201:
