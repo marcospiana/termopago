@@ -40,6 +40,9 @@ TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip() or None
 # Sin latido por mas de esto (seg) -> se considera caido y avisa. 180 = 3 min
 # (3 latidos perdidos) para no dar falsas alarmas por un latido salteado.
 ALERTA_OFFLINE_S = int((os.environ.get("ALERTA_OFFLINE_S") or "180").strip() or "180")
+# Cada cuanto se re-arma el QR de las cajas MQTT. La orden se muere a los ~8 min,
+# asi que hay que re-armar antes. 240 = 4 min (2x de margen). Configurable en Railway.
+REARME_SEGUNDOS = int((os.environ.get("REARME_SEGUNDOS") or "240").strip() or "240")
 
 # ─── MQTT: activación push de cajas tipo "pulso" (ej. inflado) ───────
 import ssl
@@ -1692,7 +1695,7 @@ def mqtt_liveness_loop():
         # El heartbeat (cada 60s) lo mantiene siempre vigente.
         try:
             rearme = disp.get("ultimo_rearme")
-            vencido = (not rearme) or (ahora - datetime.fromisoformat(rearme)).total_seconds() > 600
+            vencido = (not rearme) or (ahora - datetime.fromisoformat(rearme)).total_seconds() > REARME_SEGUNDOS
         except (ValueError, TypeError):
             vencido = True
         # Re-armar si vencio por tiempo O si el QR quedo cancelado (orden_qr_id
