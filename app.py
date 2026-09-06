@@ -4,6 +4,7 @@ import os
 import psycopg2
 import psycopg2.extras
 import uuid
+import secrets
 import requests
 import threading
 import time
@@ -162,6 +163,8 @@ def init_db():
             vence         TEXT
         )
     """)
+    # panel_token: link secreto del panel propio de cada cliente
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS panel_token TEXT")
     # cortes: registro de desconexiones (huecos > 30s en el polling del ESP32)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cortes (
@@ -776,6 +779,232 @@ def oauth_estado(clave):
         "ayuda": "Registra el redirect_uri en Tus Integraciones -> tu app -> Redirect URIs. "
                  "Genera el link con /conectar_cliente/<clave>/<alias>/<nombre>.",
     })
+
+
+# ─── Panel propio del cliente (link secreto, ve solo lo suyo) ─────
+
+def get_cliente_por_token(token):
+    if not token:
+        return None
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM clientes WHERE panel_token=%s", (token,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+@app.route("/panel_link/<clave>/<alias>")
+def panel_link(clave, alias):
+    """Genera (o devuelve) el link secreto del panel de un cliente.
+    Ej: /panel_link/CLAVE/villagas"""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    cli = get_cliente(alias)
+    if not cli:
+        return jsonify({"error": f"No existe el cliente '{alias}' (usar /conectar_cliente)"}), 404
+    token = cli.get("panel_token")
+    if not token:
+        token = secrets.token_urlsafe(16)
+        guardar_cliente(alias, {"panel_token": token})
+    return jsonify({
+        "cliente": alias,
+        "nombre": cli.get("nombre"),
+        "panel": f"{BASE_URL}/panel/{token}",
+        "instrucciones": "Mandale este link al cliente. Es privado: quien lo tenga ve su panel."
+    })
+
+
+@app.route("/panel/<token>", methods=["GET", "POST"])
+def panel_cliente(token):
+    """Panel propio del cliente: ve SOLO sus maquinas (estado, precio/tiempo,
+    ventas e historial) y puede editar precio y tiempo. No usa la clave
+    maestra ni ve datos de otros clientes."""
+    cli = get_cliente_por_token(token)
+    if not cli:
+        return "<h2>Link invalido</h2>", 404
+    alias = cli["alias"]
+    nombre_cli = cli.get("nombre") or alias
+
+    mis = [d for d in get_dispositivos() if d.get("cliente") == alias]
+
+    mensaje = ""
+    if request.method == "POST":
+        try:
+            cambios = []
+            for disp in mis:
+                nuevo_precio = float(request.form[f"precio__{disp['id']}"])
+                if disp["id"] in ESTACIONES_MQTT:
+                    nuevos_segundos = int(request.form[f"segundos__{disp['id']}"])
+                else:
+                    nuevos_segundos = int(request.form[f"minutos__{disp['id']}"]) * 60
+                if nuevo_precio <= 0 or nuevos_segundos <= 0:
+                    raise ValueError
+                precio_cambio = nuevo_precio != float(disp["precio"])
+                tiempo_cambio = nuevos_segundos != int(disp["segundos"])
+                actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_segundos})
+                if precio_cambio or tiempo_cambio:
+                    disp_act = get_dispositivo(disp["id"])
+                    cancelar_orden_qr(disp)
+                    rearmar_qr(disp_act)
+                    cambios.append(disp["nombre"])
+            mensaje = ("Guardado. QR actualizado: " + ", ".join(cambios)) if cambios else "Guardado."
+            mis = [d for d in get_dispositivos() if d.get("cliente") == alias]
+        except (ValueError, KeyError):
+            mensaje = "Valores invalidos, no se guardo nada."
+
+    ahora = ahora_ar()
+
+    tarjetas_estado = ""
+    campos_form = ""
+    for d in mis:
+        up = d.get("ultimo_poll")
+        try:
+            seg = (ahora - datetime.fromisoformat(up)).total_seconds() if up else None
+        except (ValueError, TypeError):
+            seg = None
+        if seg is None:
+            color, txt = "#9e9e9e", "Nunca conecto"
+        elif seg < 90:
+            color, txt = "#2e7d32", "🟢 Conectado"
+        elif seg < 600:
+            color, txt = "#f9a825", "🟡 Intermitente"
+        else:
+            color, txt = "#c62828", "🔴 Caido"
+        if seg is None:
+            hace = "—"
+        elif seg < 60:      hace = f"hace {int(seg)} seg"
+        elif seg < 3600:    hace = f"hace {int(seg//60)} min"
+        elif seg < 86400:   hace = f"hace {int(seg//3600)} h"
+        else:               hace = f"hace {int(seg//86400)} dias"
+
+        tarjetas_estado += (
+            f'<div class="est"><div class="en">{d["nombre"]}</div>'
+            f'<div style="color:{color};font-weight:600">{txt}</div>'
+            f'<div class="eh">Ultimo contacto: {hace}</div></div>')
+
+        if d["id"] in ESTACIONES_MQTT:
+            campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
+                            f'<input type="number" name="segundos__{d["id"]}" min="1" value="{int(d["segundos"])}">')
+        else:
+            campo_tiempo = (f'<label>Tiempo (minutos)</label>'
+                            f'<input type="number" name="minutos__{d["id"]}" min="1" value="{d["segundos"] // 60}">')
+        campos_form += (
+            f'<fieldset><legend>{d["nombre"]}</legend>'
+            f'<label>Precio (ARS)</label>'
+            f'<input type="number" name="precio__{d["id"]}" step="0.01" min="1" value="{float(d["precio"]):g}">'
+            f'{campo_tiempo}</fieldset>')
+
+    if not mis:
+        tarjetas_estado = '<div class="est">Todavia no tenes maquinas asignadas.</div>'
+
+    mis_ids = tuple(d["id"] for d in mis)
+    def nuevo(): return {"ventas": 0, "monto": 0.0}
+    tot_hoy, tot_mes, tot_all = nuevo(), nuevo(), nuevo()
+    por_dia = {}
+    ultimos = []
+    if mis_ids:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            r"""SELECT dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado, segundos
+                FROM ordenes WHERE dispositivo_id IN %s
+                AND (id LIKE 'ord\_%%' OR id LIKE 'pay\_%%' OR id LIKE 'mo\_%%')
+                ORDER BY fecha DESC""",
+            (mis_ids,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        hoy = ahora.strftime("%Y-%m-%d")
+        mes_actual = ahora.strftime("%Y-%m")
+        for r in rows:
+            dia = (r["fecha"] or "")[:10]
+            m = float(r["monto"] or 0)
+            for dest in (por_dia.setdefault(dia, nuevo()), tot_all):
+                dest["ventas"] += 1; dest["monto"] += m
+            if dia == hoy:
+                tot_hoy["ventas"] += 1; tot_hoy["monto"] += m
+            if dia[:7] == mes_actual:
+                tot_mes["ventas"] += 1; tot_mes["monto"] += m
+        ultimos = rows[:25]
+
+    def tarjeta(t, d):
+        return (f'<div class="card"><div class="ct">{t}</div>'
+                f'<div class="cv">${d["monto"]:,.0f}</div>'
+                f'<div class="cs">{d["ventas"]} ventas</div></div>')
+
+    nombres = {d["id"]: d["nombre"] for d in mis}
+    filas_hist = ""
+    for o in ultimos:
+        f = o["fecha"] or ""
+        dia = (f[8:10] + "/" + f[5:7]) if len(f) >= 10 else f
+        hora = f[11:16] if len(f) >= 16 else ""
+        monto = f"${float(o['monto']):,.0f}" if o.get("monto") else "—"
+        filas_hist += (f'<tr><td>{dia}</td><td><b>{hora}</b></td>'
+                       f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td>'
+                       f'<td style="text-align:right">{monto}</td></tr>')
+    if not filas_hist:
+        filas_hist = '<tr><td colspan="4">Sin ventas todavia</td></tr>'
+
+    filas_dia = ""
+    for k in sorted(por_dia.keys(), reverse=True)[:30]:
+        d = por_dia[k]
+        filas_dia += f'<tr><td>{k}</td><td>{d["ventas"]}</td><td>${d["monto"]:,.0f}</td></tr>'
+    if not filas_dia:
+        filas_dia = '<tr><td colspan="3">Sin datos</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago - {nombre_cli}</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 640px; margin: 20px auto; padding: 0 14px; color:#222; }}
+  h2 {{ margin-bottom: 2px; }}
+  h3 {{ margin: 26px 0 8px; color:#1b4f72; }}
+  .sub {{ color:#888; font-size:13px; margin-bottom:12px; }}
+  .est {{ background:#f4f8fb; border:1px solid #dce6ee; border-radius:10px; padding:12px 14px; margin-top:10px; }}
+  .en {{ font-weight:bold; }}
+  .eh {{ color:#888; font-size:13px; margin-top:2px; }}
+  .cards {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }}
+  .card {{ flex:1; min-width:120px; background:#009ee3; color:white; border-radius:10px; padding:12px 14px; }}
+  .ct {{ font-size:13px; opacity:.9; }} .cv {{ font-size:24px; font-weight:bold; margin:2px 0; }}
+  .cs {{ font-size:12px; opacity:.9; }}
+  fieldset {{ margin-top: 12px; border: 1px solid #ccc; border-radius: 8px; padding: 12px; }}
+  legend {{ font-weight: bold; padding: 0 6px; }}
+  label {{ display:block; margin-top:10px; font-size:14px; }}
+  input {{ width:100%; padding:10px; font-size:17px; margin-top:4px; box-sizing:border-box; }}
+  button {{ margin-top:16px; width:100%; padding:14px; font-size:17px; background:#009ee3;
+           color:white; border:none; border-radius:6px; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ border: 1px solid #ddd; padding: 7px 10px; text-align:left; font-size:14px; }}
+  th {{ background:#eaf4fb; color:#1b4f72; }}
+  tr:nth-child(even) td {{ background:#f7f9fb; }}
+  .msg {{ margin-top:14px; font-size:15px; color:#1b7a2e; }}
+</style></head><body>
+<h2>👋 Hola, {nombre_cli}</h2>
+<div class="sub">Panel de tus maquinas · hora de Argentina</div>
+
+<h3>📡 Estado de conexion</h3>
+{tarjetas_estado}
+
+<h3>📊 Ventas</h3>
+<div class="cards">{tarjeta("Hoy", tot_hoy)}{tarjeta("Este mes", tot_mes)}{tarjeta("Historico", tot_all)}</div>
+
+<h3>💲 Precio y tiempo</h3>
+<form method="post">{campos_form}
+  <button type="submit">Guardar cambios</button>
+</form>
+<p class="msg">{mensaje}</p>
+
+<h3>🧾 Ultimas ventas</h3>
+<table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th style="text-align:right">Monto</th></tr>{filas_hist}</table>
+
+<h3>📅 Por dia (ultimos 30)</h3>
+<table><tr><th>Dia</th><th>Ventas</th><th>Facturado</th></tr>{filas_dia}</table>
+
+<p class="sub" style="margin-top:22px">Los montos se registran desde julio 2026; ventas anteriores pueden figurar en $0.</p>
+</body></html>"""
 
 
 # ─── Alta de dispositivos: crea la caja y el QR en MercadoPago ────
