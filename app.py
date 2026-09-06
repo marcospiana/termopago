@@ -729,6 +729,55 @@ def ver_clientes(clave):
     conn.close()
     return jsonify([dict(f) for f in filas])
 
+@app.route("/oauth_estado/<clave>")
+def oauth_estado(clave):
+    """Diagnostico del marketplace OAuth: dice si las variables estan
+    cargadas, que redirect_uri se usa, y el estado de cada cliente y sus
+    cajas. NO expone secretos (solo si estan seteados o no)."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    redirect_uri = f"{BASE_URL}/oauth_callback"
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT alias, nombre, mp_user_id, vence, "
+                "(access_token IS NOT NULL) AS conectado FROM clientes ORDER BY alias")
+    filas = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    clientes = []
+    for f in filas:
+        dias = None
+        try:
+            if f.get("vence"):
+                dias = round((datetime.fromisoformat(f["vence"]) - ahora_ar()).total_seconds() / 86400, 1)
+        except (ValueError, TypeError):
+            dias = None
+        cajas = [d["id"] for d in get_dispositivos() if d.get("cliente") == f["alias"]]
+        clientes.append({
+            "alias": f["alias"],
+            "nombre": f["nombre"],
+            "mp_user_id": f["mp_user_id"],
+            "conectado": bool(f["conectado"]),
+            "dias_para_vencer": dias,
+            "cajas": cajas,
+        })
+
+    listo = bool(MP_CLIENT_ID and MP_CLIENT_SECRET)
+    return jsonify({
+        "marketplace_listo": listo,
+        "variables": {
+            "MP_CLIENT_ID": "OK" if MP_CLIENT_ID else "FALTA",
+            "MP_CLIENT_SECRET": "OK" if MP_CLIENT_SECRET else "FALTA",
+            "FEE_PORCENTAJE": FEE_PORCENTAJE,
+        },
+        "redirect_uri_a_registrar_en_mp": redirect_uri,
+        "clientes": clientes,
+        "ayuda": "Registra el redirect_uri en Tus Integraciones -> tu app -> Redirect URIs. "
+                 "Genera el link con /conectar_cliente/<clave>/<alias>/<nombre>.",
+    })
+
+
 # ─── Alta de dispositivos: crea la caja y el QR en MercadoPago ────
 
 @app.route("/crear_dispositivo/<clave>/<disp_id>/<nombre>")
