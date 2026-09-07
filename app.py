@@ -172,6 +172,8 @@ def init_db():
     """)
     # panel_token: link secreto del panel propio de cada cliente
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS panel_token TEXT")
+    # pin: clave corta del cliente para regalar fichas desde su panel
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin TEXT")
     # cortes: registro de desconexiones (huecos > 30s en el polling del ESP32)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cortes (
@@ -815,12 +817,48 @@ def panel_link(clave, alias):
     if not token:
         token = secrets.token_urlsafe(16)
         guardar_cliente(alias, {"panel_token": token})
+    pin = cli.get("pin")
+    if not pin:
+        pin = f"{secrets.randbelow(10000):04d}"
+        guardar_cliente(alias, {"pin": pin})
     return jsonify({
         "cliente": alias,
         "nombre": cli.get("nombre"),
         "panel": f"{BASE_URL}/panel/{token}",
-        "instrucciones": "Mandale este link al cliente. Es privado: quien lo tenga ve su panel."
+        "pin_para_regalar": pin,
+        "instrucciones": "Mandale el link al cliente (es privado). El PIN es para que pueda regalar fichas desde el panel."
     })
+
+
+def regalar_ficha(cli, mis, pin_ingresado):
+    """El cliente regala 1 ficha desde su panel, validando su PIN. Se registra
+    como orden 'gift_' -> NO cuenta como venta, pero queda el rastro."""
+    pin_real = (cli.get("pin") or "").strip()
+    if not pin_real:
+        return "No tenes PIN configurado todavia. Pediselo a TermoPago."
+    if (pin_ingresado or "").strip() != pin_real:
+        return "PIN incorrecto. No se regalo ninguna ficha."
+    fichas = [d for d in mis if d["id"] in ESTACIONES_FICHAS]
+    if not fichas:
+        return "No tenes una expendedora de fichas asignada."
+    ahora = ahora_ar()
+    regaladas = 0
+    for d in fichas:
+        up = d.get("ultimo_poll")
+        try:
+            seg = (ahora - datetime.fromisoformat(up)).total_seconds() if up else None
+        except (ValueError, TypeError):
+            seg = None
+        if seg is None or seg > 600:
+            return f"La maquina '{d['nombre']}' esta desconectada. Proba cuando vuelva a estar en linea."
+        oid = "gift_" + uuid.uuid4().hex[:16]
+        if publicar_activacion(d["id"], oid, segundos_override=1):
+            insertar_orden(oid, d["id"], 1, 0)
+            marcar_orden(oid, "regalada")
+            regaladas += 1
+    if regaladas:
+        return f"🎁 Listo! Regalaste {regaladas} ficha(s). Ya sale de la maquina."
+    return "No se pudo regalar (MQTT sin configurar o error de envio)."
 
 
 @app.route("/panel/<token>", methods=["GET", "POST"])
@@ -837,7 +875,9 @@ def panel_cliente(token):
     mis = [d for d in get_dispositivos() if d.get("cliente") == alias]
 
     mensaje = ""
-    if request.method == "POST":
+    if request.method == "POST" and request.form.get("accion") == "regalar":
+        mensaje = regalar_ficha(cli, mis, request.form.get("pin", ""))
+    elif request.method == "POST":
         try:
             cambios = []
             for disp in mis:
@@ -939,6 +979,28 @@ def panel_cliente(token):
                 tot_mes["ventas"] += 1; tot_mes["monto"] += m
         ultimos = rows[:25]
 
+    regaladas_mes = 0
+    if mis_ids:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(r"""SELECT fecha FROM ordenes WHERE dispositivo_id IN %s AND id LIKE 'gift\_%%'""", (mis_ids,))
+        for rg in cur.fetchall():
+            if (rg["fecha"] or "")[:7] == ahora.strftime("%Y-%m"):
+                regaladas_mes += 1
+        cur.close(); conn.close()
+
+    bloque_regalo = ""
+    if any(d["id"] in ESTACIONES_FICHAS for d in mis):
+        bloque_regalo = (
+            '<h3>🎁 Regalar una ficha</h3>'
+            '<form method="post">'
+            '<input type="hidden" name="accion" value="regalar">'
+            '<label>Tu PIN</label>'
+            '<input type="text" inputmode="numeric" name="pin" placeholder="PIN" autocomplete="off">'
+            '<button type="submit">Regalar 1 ficha</button>'
+            '</form>'
+            f'<p class="sub">Regalaste {regaladas_mes} ficha(s) este mes.</p>'
+        )
+
     def tarjeta(t, d):
         return (f'<div class="card"><div class="ct">{t}</div>'
                 f'<div class="cv">${d["monto"]:,.0f}</div>'
@@ -994,6 +1056,7 @@ def panel_cliente(token):
 </style></head><body>
 <h2>👋 Hola, {nombre_cli}</h2>
 <div class="sub">Panel de tus maquinas · hora de Argentina</div>
+<p class="msg">{mensaje}</p>
 
 <h3>📡 Estado de conexion</h3>
 {tarjetas_estado}
@@ -1001,11 +1064,12 @@ def panel_cliente(token):
 <h3>📊 Ventas</h3>
 <div class="cards">{tarjeta("Hoy", tot_hoy)}{tarjeta("Este mes", tot_mes)}{tarjeta("Historico", tot_all)}</div>
 
+{bloque_regalo}
+
 <h3>💲 Precio y tiempo</h3>
 <form method="post">{campos_form}
   <button type="submit">Guardar cambios</button>
 </form>
-<p class="msg">{mensaje}</p>
 
 <h3>🧾 Ultimas ventas</h3>
 <table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th style="text-align:right">Monto</th></tr>{filas_hist}</table>
