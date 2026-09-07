@@ -877,34 +877,11 @@ def panel_cliente(token):
     mensaje = ""
     if request.method == "POST" and request.form.get("accion") == "regalar":
         mensaje = regalar_ficha(cli, mis, request.form.get("pin", ""))
-    elif request.method == "POST":
-        try:
-            cambios = []
-            for disp in mis:
-                nuevo_precio = float(request.form[f"precio__{disp['id']}"])
-                if disp["id"] in ESTACIONES_MQTT:
-                    nuevos_segundos = int(request.form[f"segundos__{disp['id']}"])
-                else:
-                    nuevos_segundos = int(request.form[f"minutos__{disp['id']}"]) * 60
-                if nuevo_precio <= 0 or nuevos_segundos <= 0:
-                    raise ValueError
-                precio_cambio = nuevo_precio != float(disp["precio"])
-                tiempo_cambio = nuevos_segundos != int(disp["segundos"])
-                actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_segundos})
-                if precio_cambio or tiempo_cambio:
-                    disp_act = get_dispositivo(disp["id"])
-                    cancelar_orden_qr(disp)
-                    rearmar_qr(disp_act)
-                    cambios.append(disp["nombre"])
-            mensaje = ("Guardado. QR actualizado: " + ", ".join(cambios)) if cambios else "Guardado."
-            mis = [d for d in get_dispositivos() if d.get("cliente") == alias]
-        except (ValueError, KeyError):
-            mensaje = "Valores invalidos, no se guardo nada."
 
     ahora = ahora_ar()
 
     tarjetas_estado = ""
-    campos_form = ""
+    info_maquinas = ""
     for d in mis:
         up = d.get("ultimo_poll")
         try:
@@ -932,19 +909,14 @@ def panel_cliente(token):
             f'<div class="eh">Ultimo contacto: {hace}</div></div>')
 
         if d["id"] in ESTACIONES_FICHAS:
-            campo_tiempo = (f'<label>Fichas por pago</label>'
-                            f'<input type="number" name="segundos__{d["id"]}" min="1" value="{int(d["segundos"])}">')
+            unidad = f'{int(d["segundos"])} ficha(s) por pago'
         elif d["id"] in ESTACIONES_MQTT:
-            campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
-                            f'<input type="number" name="segundos__{d["id"]}" min="1" value="{int(d["segundos"])}">')
+            unidad = f'{int(d["segundos"])} seg de conteo'
         else:
-            campo_tiempo = (f'<label>Tiempo (minutos)</label>'
-                            f'<input type="number" name="minutos__{d["id"]}" min="1" value="{d["segundos"] // 60}">')
-        campos_form += (
-            f'<fieldset><legend>{d["nombre"]}</legend>'
-            f'<label>Precio (ARS)</label>'
-            f'<input type="number" name="precio__{d["id"]}" step="0.01" min="1" value="{float(d["precio"]):g}">'
-            f'{campo_tiempo}</fieldset>')
+            unidad = f'{d["segundos"] // 60} min'
+        info_maquinas += (
+            f'<div class="est"><div class="en">{d["nombre"]}</div>'
+            f'<div class="eh">Precio: ${float(d["precio"]):g} · {unidad}</div></div>')
 
     if not mis:
         tarjetas_estado = '<div class="est">Todavia no tenes maquinas asignadas.</div>'
@@ -1066,10 +1038,9 @@ def panel_cliente(token):
 
 {bloque_regalo}
 
-<h3>💲 Precio y tiempo</h3>
-<form method="post">{campos_form}
-  <button type="submit">Guardar cambios</button>
-</form>
+<h3>💲 Precio y cantidad</h3>
+{info_maquinas}
+<p class="sub">El precio y la cantidad de fichas los ajusta TermoPago. Si necesitás un cambio, avisanos.</p>
 
 <h3>🧾 Ultimas ventas</h3>
 <table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th style="text-align:right">Monto</th></tr>{filas_hist}</table>
