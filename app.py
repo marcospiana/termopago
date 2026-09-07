@@ -63,11 +63,14 @@ MQTT_USER = (os.environ.get("MQTT_USER") or "").strip() or None
 MQTT_PASS = os.environ.get("MQTT_PASS") or None
 
 # Cajas que se activan por push MQTT, no por polling de /orden.
-ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01", "aspiradora02", "soplado02"}
+ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01", "aspiradora02", "soplado02", "villagas01"}
 # De esas, las de PULSO (un disparo instantaneo) se marcan completadas al toque.
 # Las demas son de servicio SOSTENIDO: se marcan 'ejecutando' con inicio, para
 # que la recuperacion tras corte de luz calcule el tiempo restante.
-ESTACIONES_PULSO = {"inflado01"}
+ESTACIONES_PULSO = {"inflado01", "villagas01"}
+# Expendedoras de fichas: en vez de "segundos" el cmd MQTT lleva "cantidad" de
+# fichas; el campo "segundos" del dispositivo guarda cuantas fichas por pago.
+ESTACIONES_FICHAS = {"villagas01"}
 
 # Cajas que comparten un mismo ESP fisico: si una se cae, estan TODAS caidas.
 # Se usa para cancelar los QR de todas cuando el equipo se va offline.
@@ -94,7 +97,11 @@ def publicar_activacion(caja_id, pago_id, segundos_override=None):
     else:
         disp = get_dispositivo(caja_id)
         segundos = int(disp["segundos"]) if disp and disp.get("segundos") else 90
-    payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "segundos": segundos})
+    if caja_id in ESTACIONES_FICHAS:
+        # expendedora: el campo "segundos" del disp guarda las fichas por pago
+        payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "cantidad": segundos})
+    else:
+        payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "segundos": segundos})
     try:
         _mqtt_publish.single(
             topic=f"termopago/{caja_id}/cmd", payload=payload, qos=1, retain=False,
@@ -884,7 +891,10 @@ def panel_cliente(token):
             f'<div style="color:{color};font-weight:600">{txt}</div>'
             f'<div class="eh">Ultimo contacto: {hace}</div></div>')
 
-        if d["id"] in ESTACIONES_MQTT:
+        if d["id"] in ESTACIONES_FICHAS:
+            campo_tiempo = (f'<label>Fichas por pago</label>'
+                            f'<input type="number" name="segundos__{d["id"]}" min="1" value="{int(d["segundos"])}">')
+        elif d["id"] in ESTACIONES_MQTT:
             campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
                             f'<input type="number" name="segundos__{d["id"]}" min="1" value="{int(d["segundos"])}">')
         else:
@@ -1097,7 +1107,7 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
         cur.execute(
             "INSERT INTO dispositivos (id, nombre, external_pos_id, precio, segundos, token_env, cliente) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-            (disp_id, nombre, external_id, 500, 300, token_env, cliente_alias)
+            (disp_id, nombre, external_id, 500, (1 if disp_id in ESTACIONES_FICHAS else 300), token_env, cliente_alias)
         )
         conn.commit()
         cur.close()
@@ -1242,7 +1252,10 @@ def config_panel(clave):
 
     filas = ""
     for disp in get_dispositivos():
-        if disp["id"] in ESTACIONES_MQTT:
+        if disp["id"] in ESTACIONES_FICHAS:
+            campo_tiempo = (f'<label>Fichas por pago</label>'
+                            f'<input type="number" name="segundos__{disp["id"]}" min="1" value="{int(disp["segundos"])}">')
+        elif disp["id"] in ESTACIONES_MQTT:
             campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
                             f'<input type="number" name="segundos__{disp["id"]}" min="1" value="{int(disp["segundos"])}">')
         else:
