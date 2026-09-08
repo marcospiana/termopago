@@ -925,7 +925,7 @@ def panel_cliente(token):
     def nuevo(): return {"ventas": 0, "monto": 0.0}
     tot_hoy, tot_mes, tot_all = nuevo(), nuevo(), nuevo()
     por_dia = {}
-    ultimos = []
+    rows = []
     if mis_ids:
         conn = get_db()
         cur = conn.cursor()
@@ -951,7 +951,6 @@ def panel_cliente(token):
                 tot_hoy["ventas"] += 1; tot_hoy["monto"] += m
             if dia[:7] == mes_actual:
                 tot_mes["ventas"] += 1; tot_mes["monto"] += m
-        ultimos = rows[:25]
 
     regaladas_mes = 0
     if mis_ids:
@@ -981,20 +980,32 @@ def panel_cliente(token):
                 f'<div class="cs">{d["ventas"]} ventas</div></div>')
 
     nombres = {d["id"]: d["nombre"] for d in mis}
-    filas_hist = ""
-    for o in ultimos:
+    ventas_rows = [o for o in rows if not (o["id"] or "").startswith("gift_")][:25]
+    regalo_rows = [o for o in rows if (o["id"] or "").startswith("gift_")][:25]
+
+    def _dia_hora(o):
         f = o["fecha"] or ""
         dia = (f[8:10] + "/" + f[5:7]) if len(f) >= 10 else f
         hora = f[11:16] if len(f) >= 16 else ""
-        if (o["id"] or "").startswith("gift_"):
-            monto = "🎁 Regalo"
-        else:
-            monto = f"${float(o['monto']):,.0f}" if o.get("monto") else "—"
+        return dia, hora
+
+    filas_hist = ""
+    for o in ventas_rows:
+        dia, hora = _dia_hora(o)
+        monto = f"${float(o['monto']):,.0f}" if o.get("monto") else "—"
         filas_hist += (f'<tr><td>{dia}</td><td><b>{hora}</b></td>'
                        f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td>'
                        f'<td style="text-align:right">{monto}</td></tr>')
     if not filas_hist:
-        filas_hist = '<tr><td colspan="4">Sin movimientos todavia</td></tr>'
+        filas_hist = '<tr><td colspan="4">Sin ventas todavia</td></tr>'
+
+    filas_regalos = ""
+    for o in regalo_rows:
+        dia, hora = _dia_hora(o)
+        filas_regalos += (f'<tr><td>{dia}</td><td><b>{hora}</b></td>'
+                          f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td></tr>')
+    if not filas_regalos:
+        filas_regalos = '<tr><td colspan="3">Sin regaladas todavia</td></tr>'
 
     filas_dia = ""
     for k in sorted(por_dia.keys(), reverse=True)[:30]:
@@ -1049,6 +1060,9 @@ def panel_cliente(token):
 
 <h3>🧾 Ultimas ventas</h3>
 <table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th style="text-align:right">Monto</th></tr>{filas_hist}</table>
+
+<h3>🎁 Fichas regaladas</h3>
+<table><tr><th>Dia</th><th>Hora</th><th>Maquina</th></tr>{filas_regalos}</table>
 
 <h3>📅 Por dia (ultimos 30)</h3>
 <table><tr><th>Dia</th><th>Ventas</th><th>Facturado</th></tr>{filas_dia}</table>
