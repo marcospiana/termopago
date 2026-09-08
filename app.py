@@ -416,8 +416,12 @@ def rearmar_qr(disp):
     headers = mp_headers(token_de(disp))
     headers["X-Idempotency-Key"] = str(uuid.uuid4())
     monto = f"{float(disp['precio']):.2f}"
-    minutos = disp["segundos"] // 60
-    titulo = f"{disp['nombre']} {minutos} minutos" if minutos >= 1 else disp["nombre"]
+    if disp["id"] in ESTACIONES_FICHAS:
+        # Fichas: el concepto del pago que ve el cliente al escanear (ej "Ficha x 1")
+        titulo = f"Ficha x {int(disp['segundos'])}"
+    else:
+        minutos = disp["segundos"] // 60
+        titulo = f"{disp['nombre']} {minutos} minutos" if minutos >= 1 else disp["nombre"]
     orden = {
         "type": "qr",
         "external_reference": disp["id"],
