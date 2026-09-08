@@ -930,9 +930,9 @@ def panel_cliente(token):
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            r"""SELECT dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado, segundos
+            r"""SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado
                 FROM ordenes WHERE dispositivo_id IN %s
-                AND (id LIKE 'ord\_%%' OR id LIKE 'pay\_%%' OR id LIKE 'mo\_%%')
+                AND (id LIKE 'ord\_%%' OR id LIKE 'pay\_%%' OR id LIKE 'mo\_%%' OR id LIKE 'gift\_%%')
                 ORDER BY fecha DESC""",
             (mis_ids,))
         rows = cur.fetchall()
@@ -941,6 +941,8 @@ def panel_cliente(token):
         hoy = ahora.strftime("%Y-%m-%d")
         mes_actual = ahora.strftime("%Y-%m")
         for r in rows:
+            if (r["id"] or "").startswith("gift_"):
+                continue   # las regaladas se muestran en la lista pero NO facturan
             dia = (r["fecha"] or "")[:10]
             m = float(r["monto"] or 0)
             for dest in (por_dia.setdefault(dia, nuevo()), tot_all):
@@ -984,12 +986,15 @@ def panel_cliente(token):
         f = o["fecha"] or ""
         dia = (f[8:10] + "/" + f[5:7]) if len(f) >= 10 else f
         hora = f[11:16] if len(f) >= 16 else ""
-        monto = f"${float(o['monto']):,.0f}" if o.get("monto") else "—"
+        if (o["id"] or "").startswith("gift_"):
+            monto = "🎁 Regalo"
+        else:
+            monto = f"${float(o['monto']):,.0f}" if o.get("monto") else "—"
         filas_hist += (f'<tr><td>{dia}</td><td><b>{hora}</b></td>'
                        f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td>'
                        f'<td style="text-align:right">{monto}</td></tr>')
     if not filas_hist:
-        filas_hist = '<tr><td colspan="4">Sin ventas todavia</td></tr>'
+        filas_hist = '<tr><td colspan="4">Sin movimientos todavia</td></tr>'
 
     filas_dia = ""
     for k in sorted(por_dia.keys(), reverse=True)[:30]:
