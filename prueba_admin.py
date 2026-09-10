@@ -322,6 +322,44 @@ chequear("ya no queda ningun boton de baja de cliente",
 r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "no_existe"})
 chequear("cliente inexistente da error, no rompe", b"No existe ese cliente" in r.data)
 
+print("\n== 8c. Freno de fuerza bruta del PIN ==")
+c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": "lavadero"})
+cli = app.get_cliente("lavadero")
+pin_ok, tok = cli["pin"], cli["panel_token"]
+pin_malo = "0000" if pin_ok != "0000" else "1111"
+
+for i in range(1, app.PIN_MAX_INTENTOS):
+    r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_malo})
+    chequear(f"intento fallido {i} avisa cuantos quedan",
+             f"Te queda(n) {app.PIN_MAX_INTENTOS - i}".encode() in r.data, r.data[-400:])
+
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_malo})
+chequear("al llegar al tope se bloquea", "se bloqueo el regalo".encode() in r.data, r.data[-400:])
+chequear("quedo grabado el bloqueo en la DB",
+         bool(app.get_cliente("lavadero")["pin_bloqueado_hasta"]))
+
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+chequear("bloqueado, ni el PIN correcto pasa", "Proba de nuevo en".encode() in r.data, r.data[-400:])
+
+# El bloqueo se vence solo: lo corremos al pasado en vez de esperar 15 min.
+app.guardar_cliente("lavadero", {
+    "pin_bloqueado_hasta": (app.ahora_ar() - app.timedelta(minutes=1)).isoformat()})
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+chequear("vencido el bloqueo, el PIN correcto vuelve a andar",
+         "Proba de nuevo en".encode() not in r.data and b"PIN incorrecto" not in r.data,
+         r.data[-400:])
+chequear("el PIN correcto limpia el contador",
+         not app.get_cliente("lavadero")["pin_fallidos"])
+
+# Un PIN nuevo desde el admin tiene que levantar el bloqueo.
+app.guardar_cliente("lavadero", {
+    "pin_fallidos": 9,
+    "pin_bloqueado_hasta": (app.ahora_ar() + app.timedelta(minutes=30)).isoformat()})
+c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": "lavadero"})
+cli = app.get_cliente("lavadero")
+chequear("PIN nuevo levanta el bloqueo", not cli["pin_bloqueado_hasta"] and not cli["pin_fallidos"],
+         (cli["pin_bloqueado_hasta"], cli["pin_fallidos"]))
+
 print("\n== 9. /config sigue funcionando con los tipos nuevos ==")
 r = c.get(f"/config/{K}")
 chequear("config carga", r.status_code == 200, r.status_code)

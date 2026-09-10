@@ -34,6 +34,12 @@ FEE_PORCENTAJE   = float(os.environ.get("FEE_PORCENTAJE", "0"))  # tu comisión,
 # el equipo (offline) la ejecute, antes de devolverle el dinero al cliente
 REEMBOLSO_MINUTOS = int(os.environ.get("REEMBOLSO_MINUTOS", "5"))
 
+# Freno de fuerza bruta del PIN con que el cliente regala fichas desde su panel.
+# Tras PIN_MAX_INTENTOS fallidos, el regalo queda bloqueado PIN_BLOQUEO_MIN
+# minutos para ese cliente. Configurables en Railway.
+PIN_MAX_INTENTOS = int((os.environ.get("PIN_MAX_INTENTOS") or "5").strip() or "5")
+PIN_BLOQUEO_MIN  = int((os.environ.get("PIN_BLOQUEO_MIN") or "15").strip() or "15")
+
 # ── Alertas por Telegram (equipo caido) ──
 # Se setean en Railway (Variables). Sin ellas, las alertas no arrancan.
 TELEGRAM_TOKEN   = (os.environ.get("TELEGRAM_TOKEN") or "").strip() or None
@@ -283,6 +289,10 @@ def init_db():
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS panel_token TEXT")
     # pin: clave corta del cliente para regalar fichas desde su panel
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin TEXT")
+    # freno de fuerza bruta del PIN: intentos fallidos seguidos y, al pasarse,
+    # hasta cuando queda bloqueado el regalo para ese cliente
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_fallidos INTEGER")
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_bloqueado_hasta TEXT")
     # cortes: registro de desconexiones (huecos > 30s en el polling del ESP32)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cortes (
@@ -965,11 +975,46 @@ def panel_link(clave, alias):
 def regalar_ficha(cli, mis, pin_ingresado):
     """El cliente regala 1 ficha desde su panel, validando su PIN. Se registra
     como orden 'gift_' -> NO cuenta como venta, pero queda el rastro."""
+    alias = cli["alias"]
     pin_real = (cli.get("pin") or "").strip()
     if not pin_real:
         return "No tenes PIN configurado todavia. Pediselo a TermoPago."
+
+    # Freno de fuerza bruta: un PIN son 4 digitos = 10.000 combinaciones, o sea
+    # nada para un script. Sin esto, cualquiera con el link del panel se saca
+    # todas las fichas que quiera probando. El contador va en la DB (no en
+    # memoria) para que un redeploy no le devuelva los intentos al atacante.
+    ahora = ahora_ar()
+    bloqueado = cli.get("pin_bloqueado_hasta")
+    if bloqueado:
+        try:
+            hasta = datetime.fromisoformat(bloqueado)
+        except (ValueError, TypeError):
+            hasta = None
+        if hasta and hasta > ahora:
+            faltan = int((hasta - ahora).total_seconds() // 60) + 1
+            return (f"Demasiados intentos con el PIN equivocado. "
+                    f"Proba de nuevo en {faltan} minuto(s).")
+
     if (pin_ingresado or "").strip() != pin_real:
-        return "PIN incorrecto. No se regalo ninguna ficha."
+        fallidos = int(cli.get("pin_fallidos") or 0) + 1
+        if fallidos >= PIN_MAX_INTENTOS:
+            guardar_cliente(alias, {
+                "pin_fallidos": 0,
+                "pin_bloqueado_hasta": (ahora + timedelta(minutes=PIN_BLOQUEO_MIN)).isoformat(),
+            })
+            print(f"[PIN] {alias}: {PIN_MAX_INTENTOS} intentos fallidos -> bloqueado {PIN_BLOQUEO_MIN} min")
+            return (f"PIN incorrecto. Por seguridad se bloqueo el regalo de fichas "
+                    f"por {PIN_BLOQUEO_MIN} minutos.")
+        guardar_cliente(alias, {"pin_fallidos": fallidos})
+        restantes = PIN_MAX_INTENTOS - fallidos
+        return (f"PIN incorrecto. No se regalo ninguna ficha. "
+                f"Te queda(n) {restantes} intento(s) antes de que se bloquee.")
+
+    # PIN correcto: se limpia el contador y cualquier bloqueo pendiente.
+    if cli.get("pin_fallidos") or cli.get("pin_bloqueado_hasta"):
+        guardar_cliente(alias, {"pin_fallidos": 0, "pin_bloqueado_hasta": None})
+
     fichas = [d for d in mis if d["id"] in ESTACIONES_FICHAS]
     if not fichas:
         return "No tenes una expendedora de fichas asignada."
@@ -1374,7 +1419,9 @@ def _admin_post(clave):
         if not cli:
             return "❌ No existe ese cliente."
         pin = f"{secrets.randbelow(10000):04d}"
-        guardar_cliente(alias, {"pin": pin})
+        # PIN nuevo = borrón y cuenta nueva: se levanta cualquier bloqueo por
+        # intentos fallidos, así el cliente puede usarlo en el momento.
+        guardar_cliente(alias, {"pin": pin, "pin_fallidos": 0, "pin_bloqueado_hasta": None})
         return (f"🔑 PIN nuevo de <b>{_esc(cli.get('nombre') or alias)}</b>: <b>{pin}</b>. "
                 f"El anterior dejó de servir para regalar fichas — pasale este.")
 
