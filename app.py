@@ -3068,7 +3068,9 @@ def vigilar_equipos():
                     continue
                 caido = gap > ALERTA_OFFLINE_S
                 ya = _alerta_estado.get(caja, False)
-                nombre = disp.get("nombre") or caja
+                _n = disp.get("nombre")
+                # incluir el id de la caja para distinguir aspiradora01/02, soplado01/02, etc.
+                nombre = f"{_n} ({caja})" if _n and _n != caja else caja
                 if caido and not ya:
                     _alerta_estado[caja] = True
                     enviar_telegram(f"\U0001F534 <b>{nombre}</b> se cayo.\nSin conexion hace {int(gap//60)} min. Los QR de ese equipo no cobran hasta que vuelva.")
