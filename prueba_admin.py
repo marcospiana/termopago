@@ -265,6 +265,23 @@ chequear("desaparecio de la tabla", app.get_dispositivo("lavadero02") is None)
 app.invalidar_cache_tipos()
 chequear("y de los conjuntos", "lavadero02" not in app.ESTACIONES_MQTT)
 
+print("\n== 8b. Baja de cliente ==")
+r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "lavadero"})
+chequear("no deja borrar un cliente con maquinas", "todavía tiene".encode() in r.data, r.data[:300])
+chequear("y el cliente sigue existiendo", app.get_cliente("lavadero") is not None)
+# En este punto hay 2 clientes: 'lava_dero' sin maquinas y 'lavadero' con 2.
+# El boton de baja tiene que aparecer una sola vez: para el que no tiene ninguna.
+chequear("el boton de baja aparece solo para el cliente sin maquinas",
+         c.get(f"/admin/{K}").data.count(b'value="borrar_cliente"') == 1,
+         c.get(f"/admin/{K}").data.count(b'value="borrar_cliente"'))
+r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "lava_dero"})
+chequear("borra un cliente sin maquinas", b"eliminado" in r.data, r.data[:300])
+chequear("desaparecio de la tabla", app.get_cliente("lava_dero") is None)
+chequear("ya no queda ningun boton de baja de cliente",
+         c.get(f"/admin/{K}").data.count(b'value="borrar_cliente"') == 0)
+r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "no_existe"})
+chequear("cliente inexistente da error, no rompe", b"No existe ese cliente" in r.data)
+
 print("\n== 9. /config sigue funcionando con los tipos nuevos ==")
 r = c.get(f"/config/{K}")
 chequear("config carga", r.status_code == 200, r.status_code)

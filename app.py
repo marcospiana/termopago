@@ -1368,6 +1368,30 @@ def _admin_post(clave):
         invalidar_cache_tipos()
         return f"✅ Actualizada la máquina <b>{_esc(disp['nombre'])}</b>."
 
+    if accion == "borrar_cliente":
+        alias = request.form.get("alias")
+        cli = get_cliente(alias)
+        if not cli:
+            return "❌ No existe ese cliente."
+        # Guarda: un cliente con maquinas no se borra de una. Primero se dan de
+        # baja las maquinas, asi nunca queda una caja huerfana cobrando a una
+        # cuenta de MercadoPago que ya no esta asociada a nadie.
+        suyas = [d for d in get_dispositivos() if d.get("cliente") == alias]
+        if suyas:
+            nombres = ", ".join(_esc(d["nombre"]) for d in suyas)
+            return (f"❌ <b>{_esc(cli.get('nombre') or alias)}</b> todavía tiene "
+                    f"{len(suyas)} máquina(s): {nombres}. Dalas de baja primero.")
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM clientes WHERE alias=%s", (alias,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return (f"🗑️ Cliente <b>{_esc(cli.get('nombre') or alias)}</b> eliminado. "
+                f"Su link de panel deja de funcionar. Si había conectado su "
+                f"MercadoPago, la autorización sigue viva del lado de ellos: "
+                f"para cortarla del todo, que la revoquen desde su cuenta.")
+
     if accion == "borrar_maquina":
         disp_id = request.form.get("disp_id")
         disp = get_dispositivo(disp_id)
@@ -1487,12 +1511,24 @@ def admin_panel(clave):
             estado_mp = '<span class="warn">Falta cargar MP_CLIENT_ID / MP_CLIENT_SECRET en Railway</span>'
         n = len(maquinas) + 1
         sugerido = f"{alias}{n:02d}"
+        # La baja del cliente solo se ofrece cuando ya no le queda ninguna
+        # maquina: evita borrar de un click a alguien que esta cobrando.
+        if maquinas:
+            baja_cli = ""
+        else:
+            baja_cli = f"""
+      <form method="post" style="display:inline"
+            onsubmit="return confirm('Eliminar el cliente {_esc(cli.get('nombre') or alias)}?')">
+        <input type="hidden" name="accion" value="borrar_cliente">
+        <input type="hidden" name="alias" value="{_esc(alias)}">
+        <button class="btn mini rojo" type="submit">Eliminar cliente</button>
+      </form>"""
         bloques += f"""
   <section class="cli">
     <h2>{_esc(cli.get('nombre') or alias)} <small class="mut">{_esc(alias)}</small></h2>
     <p class="meta">{estado_mp}
        · Panel del cliente: <a href="{panel}" target="_blank">{panel}</a>
-       · PIN {_esc(pin)}</p>
+       · PIN {_esc(pin)}{baja_cli}</p>
     {tabla_maquinas(maquinas)}
     {form_maquina(alias, sugerido, tiene_oauth)}
   </section>"""
