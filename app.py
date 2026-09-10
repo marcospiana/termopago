@@ -1368,6 +1368,28 @@ def _admin_post(clave):
         invalidar_cache_tipos()
         return f"✅ Actualizada la máquina <b>{_esc(disp['nombre'])}</b>."
 
+    if accion == "nuevo_pin":
+        alias = request.form.get("alias")
+        cli = get_cliente(alias)
+        if not cli:
+            return "❌ No existe ese cliente."
+        pin = f"{secrets.randbelow(10000):04d}"
+        guardar_cliente(alias, {"pin": pin})
+        return (f"🔑 PIN nuevo de <b>{_esc(cli.get('nombre') or alias)}</b>: <b>{pin}</b>. "
+                f"El anterior dejó de servir para regalar fichas — pasale este.")
+
+    if accion == "nuevo_link":
+        alias = request.form.get("alias")
+        cli = get_cliente(alias)
+        if not cli:
+            return "❌ No existe ese cliente."
+        token = secrets.token_urlsafe(16)
+        guardar_cliente(alias, {"panel_token": token})
+        nuevo = f"{BASE_URL}/panel/{token}"
+        return (f"🔗 Link nuevo de <b>{_esc(cli.get('nombre') or alias)}</b>: "
+                f"<a href='{nuevo}'>{nuevo}</a>. El anterior ya no abre nada, "
+                f"así que mandale este.")
+
     if accion == "borrar_cliente":
         alias = request.form.get("alias")
         cli = get_cliente(alias)
@@ -1528,7 +1550,19 @@ def admin_panel(clave):
     <h2>{_esc(cli.get('nombre') or alias)} <small class="mut">{_esc(alias)}</small></h2>
     <p class="meta">{estado_mp}
        · Panel del cliente: <a href="{panel}" target="_blank">{panel}</a>
-       · PIN {_esc(pin)}{baja_cli}</p>
+       · PIN {_esc(pin)}
+      <form method="post" style="display:inline"
+            onsubmit="return confirm('Generar un PIN nuevo? El actual deja de servir.')">
+        <input type="hidden" name="accion" value="nuevo_pin">
+        <input type="hidden" name="alias" value="{_esc(alias)}">
+        <button class="btn mini gris" type="submit">PIN nuevo</button>
+      </form>
+      <form method="post" style="display:inline"
+            onsubmit="return confirm('Generar un link nuevo? El actual deja de abrir.')">
+        <input type="hidden" name="accion" value="nuevo_link">
+        <input type="hidden" name="alias" value="{_esc(alias)}">
+        <button class="btn mini gris" type="submit">Link nuevo</button>
+      </form>{baja_cli}</p>
     {tabla_maquinas(maquinas)}
     {form_maquina(alias, sugerido, tiene_oauth)}
   </section>"""
