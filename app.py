@@ -62,24 +62,125 @@ except ValueError:
 MQTT_USER = (os.environ.get("MQTT_USER") or "").strip() or None
 MQTT_PASS = os.environ.get("MQTT_PASS") or None
 
+# ─── TIPO DE CAJA: ahora vive en la DB, no en el codigo ──────────────
+# Hasta 09/2026 estos conjuntos eran literales en este archivo: dar de alta una
+# maquina obligaba a editar app.py + git push + redeploy de Railway. Desde el
+# panel /admin el tipo de cada caja es la columna 'tipo' de la tabla
+# dispositivos, y el ESP fisico que la maneja es la columna 'esp_id'.
+# Los literales de abajo quedan SOLO como semilla: init_db() los usa una unica
+# vez para completar las cajas viejas que todavia tienen tipo NULL.
+SEMILLA_MQTT   = {"inflado01", "aspiradora01", "soplado01", "aspiradora02", "soplado02", "villagas01"}
+SEMILLA_PULSO  = {"inflado01", "villagas01"}
+SEMILLA_FICHAS = {"villagas01"}
+SEMILLA_GRUPOS = {                      # esp_id -> cajas que cuelgan de ese ESP
+    "estacion01": {"aspiradora01": 0, "soplado01": 1},
+    "estacion02": {"aspiradora02": 0, "soplado02": 1},
+}
+
+# Tipos validos y como se comporta cada uno.
+TIPOS = {
+    "pulso":     "Pulso — un disparo corto; la maquina corre su ciclo interno sola",
+    "sostenida": "Sostenida — el rele queda cerrado el tiempo pagado (maestro + Nano)",
+    "fichas":    "Expendedora de fichas — el cmd lleva 'cantidad' en vez de 'segundos'",
+    "legacy":    "Vieja por polling HTTPS — sin MQTT (en retirada)",
+}
+
+# Cache chico de la tabla: __contains__ se llama seguido (webhook, subscriptor
+# MQTT, paneles) y no queremos una consulta por llamada.
+CACHE_TIPOS_S = 10
+_cache_tipos = {"t": 0.0, "filas": {}}
+_cache_tipos_lock = threading.Lock()
+
+def _semilla_como_cache():
+    """Las semillas con la forma que tiene el cache. Red de seguridad para
+    cuando todavia no se pudo leer la DB ni una sola vez."""
+    filas = {}
+    for cid in SEMILLA_MQTT:
+        if cid in SEMILLA_FICHAS:
+            tipo = "fichas"
+        elif cid in SEMILLA_PULSO:
+            tipo = "pulso"
+        else:
+            tipo = "sostenida"
+        filas[cid] = {"tipo": tipo, "esp_id": cid}
+    for esp, cajas in SEMILLA_GRUPOS.items():
+        for cid in cajas:
+            if cid in filas:
+                filas[cid]["esp_id"] = esp
+    return filas
+
+def _tipos_cache():
+    ahora = time.time()
+    with _cache_tipos_lock:
+        if _cache_tipos["filas"] and (ahora - _cache_tipos["t"]) < CACHE_TIPOS_S:
+            return _cache_tipos["filas"]
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, tipo, esp_id FROM dispositivos")
+        filas = {r["id"]: {"tipo": (r["tipo"] or "legacy"), "esp_id": (r["esp_id"] or r["id"])}
+                 for r in cur.fetchall()}
+        cur.close()
+        conn.close()
+    except Exception as e:
+        # La DB puede estar durmiendo un instante: seguimos con lo ultimo bueno
+        # en vez de tratar a todas las cajas como legacy.
+        print(f"[tipos] no pude leer dispositivos: {e}")
+        if _cache_tipos["filas"]:
+            return _cache_tipos["filas"]
+        # Cache frio (recien deployado) + DB que no responde: devolver {} haria
+        # que TODAS las cajas parezcan 'legacy', el pago no saldria por MQTT y
+        # terminaria auto-reembolsado. Caemos a las semillas, que es exactamente
+        # como se comportaba el backend cuando los tipos eran literales.
+        # No se cachea: el proximo llamado vuelve a intentar contra la DB.
+        print("[tipos] cache frio -> uso las semillas del codigo")
+        return _semilla_como_cache()
+    with _cache_tipos_lock:
+        _cache_tipos["t"] = ahora
+        _cache_tipos["filas"] = filas
+    return filas
+
+def invalidar_cache_tipos():
+    """Llamar despues de crear/editar una caja para que el cambio pegue ya."""
+    with _cache_tipos_lock:
+        _cache_tipos["t"] = 0.0
+
+class _CajasPorTipo:
+    """Se usa igual que el set de antes (`x in ESTACIONES_MQTT`, `for x in ...`)
+    pero los datos salen de la columna 'tipo'. Asi no hubo que tocar los ~20
+    lugares del backend que consultaban estos conjuntos."""
+    def __init__(self, tipos):
+        self._tipos = set(tipos)
+    def _ids(self):
+        return {cid for cid, d in _tipos_cache().items() if d["tipo"] in self._tipos}
+    def __contains__(self, caja):
+        d = _tipos_cache().get(caja)
+        return bool(d) and d["tipo"] in self._tipos
+    def __iter__(self):
+        return iter(self._ids())
+    def __len__(self):
+        return len(self._ids())
+    def __repr__(self):
+        return repr(sorted(self._ids()))
+
 # Cajas que se activan por push MQTT, no por polling de /orden.
-ESTACIONES_MQTT = {"inflado01", "aspiradora01", "soplado01", "aspiradora02", "soplado02", "villagas01"}
+ESTACIONES_MQTT = _CajasPorTipo({"pulso", "sostenida", "fichas"})
 # De esas, las de PULSO (un disparo instantaneo) se marcan completadas al toque.
 # Las demas son de servicio SOSTENIDO: se marcan 'ejecutando' con inicio, para
 # que la recuperacion tras corte de luz calcule el tiempo restante.
-ESTACIONES_PULSO = {"inflado01", "villagas01"}
+# Una expendedora de fichas tambien es un disparo instantaneo.
+ESTACIONES_PULSO = _CajasPorTipo({"pulso", "fichas"})
 # Expendedoras de fichas: en vez de "segundos" el cmd MQTT lleva "cantidad" de
 # fichas; el campo "segundos" del dispositivo guarda cuantas fichas por pago.
-ESTACIONES_FICHAS = {"villagas01"}
+ESTACIONES_FICHAS = _CajasPorTipo({"fichas"})
 
-# Cajas que comparten un mismo ESP fisico: si una se cae, estan TODAS caidas.
-# Se usa para cancelar los QR de todas cuando el equipo se va offline.
-GRUPOS_ESP = [{"aspiradora01", "soplado01"}, {"aspiradora02", "soplado02"}]
 def cajas_hermanas(caja):
-    for g in GRUPOS_ESP:
-        if caja in g:
-            return g
-    return {caja}
+    """Cajas que comparten el mismo ESP fisico (columna esp_id): si una se cae,
+    estan TODAS caidas. Se usa para cancelar los QR de todas al irse offline."""
+    filas = _tipos_cache()
+    esp = (filas.get(caja) or {}).get("esp_id") or caja
+    hermanas = {cid for cid, d in filas.items() if (d.get("esp_id") or cid) == esp}
+    return hermanas or {caja}
 
 def publicar_activacion(caja_id, pago_id, segundos_override=None):
     """Publica la orden de activar al equipo por MQTT (TLS 8883). El ESP
@@ -160,6 +261,14 @@ def init_db():
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ultimo_poll TEXT")
     # monto: importe cobrado en cada orden (para estadísticas)
     cur.execute("ALTER TABLE ordenes ADD COLUMN IF NOT EXISTS monto REAL")
+    # tipo / esp_id / canal: lo que antes eran los sets ESTACIONES_* y GRUPOS_ESP.
+    #   tipo   -> 'pulso' | 'sostenida' | 'fichas' | 'legacy'
+    #   esp_id -> ESP fisico que maneja la caja (varias cajas pueden compartirlo)
+    #   canal  -> canal dentro de ese ESP (0/1) en los maestro-esclavo
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS tipo TEXT")
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS esp_id TEXT")
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS canal INTEGER")
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS creado TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -207,6 +316,25 @@ def init_db():
         VALUES ('termo_001', 'Agua caliente', 'default', %s, %s, %s)
         ON CONFLICT (id) DO NOTHING
     """, (precio_ini, segundos_ini, orden_ini))
+
+    # ── Backfill unico de tipo/esp_id/canal desde las semillas ──
+    # Solo toca filas con la columna en NULL, asi que es idempotente: si despues
+    # cambias un tipo desde /admin, este bloque no lo pisa en el proximo deploy.
+    for cid in SEMILLA_FICHAS:
+        cur.execute("UPDATE dispositivos SET tipo='fichas' WHERE id=%s AND tipo IS NULL", (cid,))
+    for cid in SEMILLA_PULSO - SEMILLA_FICHAS:
+        cur.execute("UPDATE dispositivos SET tipo='pulso' WHERE id=%s AND tipo IS NULL", (cid,))
+    for cid in SEMILLA_MQTT - SEMILLA_PULSO:
+        cur.execute("UPDATE dispositivos SET tipo='sostenida' WHERE id=%s AND tipo IS NULL", (cid,))
+    # Lo que no estaba en ningun conjunto MQTT seguia por polling HTTPS.
+    cur.execute("UPDATE dispositivos SET tipo='legacy' WHERE tipo IS NULL")
+    for esp, cajas in SEMILLA_GRUPOS.items():
+        for cid, canal in cajas.items():
+            cur.execute("UPDATE dispositivos SET esp_id=%s, canal=%s WHERE id=%s AND esp_id IS NULL",
+                        (esp, canal, cid))
+    # Caja sola = su propio ESP.
+    cur.execute("UPDATE dispositivos SET esp_id=id WHERE esp_id IS NULL")
+
     conn.commit()
     cur.close()
     conn.close()
@@ -1077,6 +1205,590 @@ def panel_cliente(token):
 
 # ─── Alta de dispositivos: crea la caja y el QR en MercadoPago ────
 
+# ═══════════════════════════════════════════════════════════════════
+#  PANEL DE ADMINISTRACION  /admin/<clave>
+#  Alta de clientes y de sus maquinas sin tocar codigo ni redeployar.
+# ═══════════════════════════════════════════════════════════════════
+
+import html as _html
+import io as _io
+import zipfile as _zipfile
+import re as _re
+
+FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware")
+
+# Que sketch le corresponde a cada tipo. Se toma la primera carpeta que exista,
+# asi los nombres viejos siguen andando mientras se migra a los universales.
+SKETCH_POR_TIPO = {
+    "fichas":    ["termopago_fichas", "expendedora_villagas", "expendedora_fichas"],
+    "pulso":     ["termopago_pulso", "inflado01"],
+    "sostenida": ["termopago_sostenida", "estacion01_maestro_mqtt", "estacion02_maestro_mqtt"],
+    "legacy":    [],
+}
+
+def sketch_de(tipo):
+    """Carpeta de firmware que hay que flashear para ese tipo de caja."""
+    for nombre in SKETCH_POR_TIPO.get(tipo, []):
+        if os.path.isdir(os.path.join(FIRMWARE_DIR, nombre)):
+            return nombre
+    candidatos = SKETCH_POR_TIPO.get(tipo) or []
+    return candidatos[0] if candidatos else None
+
+def _esc(x):
+    return _html.escape(str(x if x is not None else ""))
+
+def _slug(x):
+    """Deja solo lo que puede ir en un id de caja y en un topic MQTT."""
+    return _re.sub(r"[^a-z0-9_]", "", (x or "").strip().lower().replace(" ", "_").replace("-", "_"))
+
+def get_clientes():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM clientes ORDER BY alias")
+    filas = cur.fetchall()
+    cur.close()
+    conn.close()
+    return filas
+
+def asegurar_panel(alias):
+    """Devuelve (link_del_panel, pin) del cliente, creandolos si no existían."""
+    cli = get_cliente(alias)
+    if not cli:
+        return None, None
+    token = cli.get("panel_token")
+    if not token:
+        token = secrets.token_urlsafe(16)
+        guardar_cliente(alias, {"panel_token": token})
+    pin = cli.get("pin")
+    if not pin:
+        pin = f"{secrets.randbelow(10000):04d}"
+        guardar_cliente(alias, {"pin": pin})
+    return f"{BASE_URL}/panel/{token}", pin
+
+def link_oauth(alias):
+    if not (MP_CLIENT_ID and MP_CLIENT_SECRET):
+        return None
+    return ("https://auth.mercadopago.com.ar/authorization"
+            f"?client_id={MP_CLIENT_ID}&response_type=code&platform_id=mp"
+            f"&state={alias}&redirect_uri={BASE_URL}/oauth_callback")
+
+def _estado_caja(disp, ahora):
+    """(color, texto, hace) segun cuando fue el ultimo latido del equipo."""
+    up = disp.get("ultimo_poll")
+    try:
+        seg = (ahora - datetime.fromisoformat(up)).total_seconds() if up else None
+    except (ValueError, TypeError):
+        seg = None
+    if seg is None:
+        return "#9e9e9e", "Nunca conectó", "—"
+    if seg < 90:
+        color, txt = "#2e7d32", "🟢 En línea"
+    elif seg < 600:
+        color, txt = "#f9a825", "🟡 Intermitente"
+    else:
+        color, txt = "#c62828", "🔴 Caído"
+    if seg < 60:      hace = f"hace {int(seg)} s"
+    elif seg < 3600:  hace = f"hace {int(seg // 60)} min"
+    elif seg < 86400: hace = f"hace {int(seg // 3600)} h"
+    else:             hace = f"hace {int(seg // 86400)} d"
+    return color, txt, hace
+
+
+def _admin_post(clave):
+    """Procesa los formularios del panel. Devuelve el mensaje a mostrar."""
+    accion = request.form.get("accion")
+
+    if accion == "nuevo_cliente":
+        alias = _slug(request.form.get("alias"))
+        nombre = (request.form.get("nombre") or "").strip()
+        if not alias:
+            return "❌ Falta el alias (letras y números, sin espacios)."
+        if get_cliente(alias):
+            return f"❌ Ya existe un cliente con el alias '{alias}'."
+        guardar_cliente(alias, {"nombre": nombre or alias})
+        panel, pin = asegurar_panel(alias)
+        return (f"✅ Cliente <b>{_esc(nombre or alias)}</b> creado. "
+                f"Panel: <a href='{panel}'>{panel}</a> · PIN {pin}. "
+                f"Ahora conectá su cuenta de MercadoPago y agregale las máquinas.")
+
+    if accion == "nueva_maquina":
+        alias = _slug(request.form.get("cliente"))
+        disp_id = _slug(request.form.get("disp_id"))
+        nombre = (request.form.get("nombre") or "").strip()
+        tipo = request.form.get("tipo")
+        if not disp_id:
+            return "❌ Falta el ID de la máquina."
+        if not nombre:
+            return "❌ Falta el nombre de la máquina."
+        if tipo not in TIPOS:
+            return "❌ Tipo de máquina inválido."
+        if get_dispositivo(disp_id):
+            return f"❌ Ya existe una máquina con el ID '{disp_id}'."
+        # De qué cuenta de MP cobra: OAuth del cliente, variable de Railway, o la propia.
+        origen = (request.form.get("cuenta") or "").strip()
+        if origen == "cliente" and alias:
+            token_env = f"cliente_{alias}"
+        elif origen.startswith("MP_"):
+            token_env = origen
+        else:
+            token_env = None
+        res = alta_dispositivo(
+            disp_id, nombre, token_env,
+            tipo=tipo,
+            esp_id=_slug(request.form.get("esp_id")) or disp_id,
+            canal=request.form.get("canal"),
+            precio=request.form.get("precio"),
+            valor=request.form.get("valor"),
+        )
+        if "error" in res:
+            return f"❌ {_esc(res['error'])} <small>{_esc(res.get('detalle', ''))}</small>"
+        # Si la caja es de un cliente OAuth, dejarla asociada aunque el alta haya
+        # usado una variable de entorno (asi aparece en el panel del cliente).
+        if alias and not res.get("cliente"):
+            actualizar_dispositivo(disp_id, {"cliente": alias})
+            invalidar_cache_tipos()
+        return (f"✅ Máquina <b>{_esc(nombre)}</b> creada ({_esc(tipo)}). "
+                f"<a href='/admin/{clave}/maquina/{disp_id}'>Ver cómo flashear el equipo →</a>")
+
+    if accion == "editar_maquina":
+        disp_id = request.form.get("disp_id")
+        disp = get_dispositivo(disp_id)
+        if not disp:
+            return "❌ No existe esa máquina."
+        campos = {}
+        tipo = request.form.get("tipo")
+        if tipo in TIPOS:
+            campos["tipo"] = tipo
+        esp = _slug(request.form.get("esp_id"))
+        if esp:
+            campos["esp_id"] = esp
+        canal = request.form.get("canal")
+        campos["canal"] = int(canal) if (canal or "").strip().isdigit() else None
+        actualizar_dispositivo(disp_id, campos)
+        invalidar_cache_tipos()
+        return f"✅ Actualizada la máquina <b>{_esc(disp['nombre'])}</b>."
+
+    if accion == "borrar_maquina":
+        disp_id = request.form.get("disp_id")
+        disp = get_dispositivo(disp_id)
+        if not disp:
+            return "❌ No existe esa máquina."
+        cancelar_orden_qr(disp)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM dispositivos WHERE id=%s", (disp_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        invalidar_cache_tipos()
+        return (f"🗑️ Máquina <b>{_esc(disp['nombre'])}</b> dada de baja. "
+                f"La caja sigue existiendo en MercadoPago (borrala desde ahí si no la vas a usar).")
+
+    return ""
+
+
+@app.route("/admin/<clave>", methods=["GET", "POST"])
+def admin_panel(clave):
+    """Panel de alta: clientes, sus máquinas y el firmware de cada equipo.
+    Todo lo que antes se hacía a mano por URL o editando app.py."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+
+    mensaje = _admin_post(clave) if request.method == "POST" else ""
+    ahora = ahora_ar()
+    dispositivos = get_dispositivos()
+    clientes = get_clientes()
+
+    # Cajas agrupadas por cliente (None = cajas propias de TermoPago)
+    por_cliente = {}
+    for d in dispositivos:
+        por_cliente.setdefault(d.get("cliente") or "", []).append(d)
+
+    opciones_tipo = "".join(
+        f'<option value="{t}">{_esc(desc)}</option>' for t, desc in TIPOS.items() if t != "legacy")
+
+    def tabla_maquinas(maquinas):
+        if not maquinas:
+            return '<p class="vacio">Todavía no tiene máquinas cargadas.</p>'
+        filas = ""
+        for d in maquinas:
+            color, txt, hace = _estado_caja(d, ahora)
+            tipo = d.get("tipo") or "legacy"
+            unidad = (f'{int(d["segundos"])} ficha(s)' if tipo == "fichas"
+                      else f'{int(d["segundos"])} s')
+            esp = d.get("esp_id") or d["id"]
+            canal = "" if d.get("canal") is None else f' · canal {d["canal"]}'
+            filas += f"""
+      <tr>
+        <td><b>{_esc(d['nombre'])}</b><br><code>{_esc(d['id'])}</code></td>
+        <td>{_esc(tipo)}<br><small class="mut">ESP: {_esc(esp)}{canal}</small></td>
+        <td>${float(d['precio']):g}<br><small class="mut">{unidad}</small></td>
+        <td style="color:{color}">{txt}<br><small class="mut">{hace}</small></td>
+        <td class="acc">
+          <a class="btn mini" href="/admin/{clave}/maquina/{d['id']}">Flashear</a>
+          <a class="btn mini gris" href="/diag_caja/{clave}/{d['id']}">Diag</a>
+          <form method="post" onsubmit="return confirm('Dar de baja {_esc(d['nombre'])}?')">
+            <input type="hidden" name="accion" value="borrar_maquina">
+            <input type="hidden" name="disp_id" value="{_esc(d['id'])}">
+            <button class="btn mini rojo" type="submit">Baja</button>
+          </form>
+        </td>
+      </tr>"""
+        return f"""<table>
+      <tr><th>Máquina</th><th>Tipo</th><th>Cobro</th><th>Estado</th><th></th></tr>
+      {filas}
+    </table>"""
+
+    def form_maquina(alias, sugerido, tiene_oauth):
+        opcion_cliente = ('<option value="cliente">Cuenta MP del cliente (OAuth)</option>'
+                          if tiene_oauth else
+                          '<option value="cliente" disabled>Cuenta MP del cliente — falta conectarla</option>')
+        return f"""
+    <details class="alta">
+      <summary>+ Agregar máquina</summary>
+      <form method="post" class="grid">
+        <input type="hidden" name="accion" value="nueva_maquina">
+        <input type="hidden" name="cliente" value="{_esc(alias)}">
+        <label>ID de la máquina <small class="mut">(va en el topic MQTT)</small>
+          <input name="disp_id" value="{_esc(sugerido)}" required></label>
+        <label>Nombre visible
+          <input name="nombre" placeholder="Aspiradora 1" required></label>
+        <label>Tipo
+          <select name="tipo">{opciones_tipo}</select></label>
+        <label>ESP que la maneja <small class="mut">(repetir para 2 cajas en un mismo ESP)</small>
+          <input name="esp_id" placeholder="{_esc(sugerido)}"></label>
+        <label>Canal <small class="mut">(0 o 1, solo maestro-esclavo)</small>
+          <input name="canal" type="number" min="0" max="3" placeholder=""></label>
+        <label>Precio (ARS)
+          <input name="precio" type="number" step="1" min="1" value="500"></label>
+        <label>Segundos o fichas por pago
+          <input name="valor" type="number" min="1" value="300"></label>
+        <label>Cobra en
+          <select name="cuenta">
+            {opcion_cliente}
+            <option value="">Cuenta propia de TermoPago</option>
+          </select></label>
+        <button class="btn" type="submit">Crear máquina y su QR</button>
+      </form>
+    </details>"""
+
+    bloques = ""
+    for cli in clientes:
+        alias = cli["alias"]
+        maquinas = por_cliente.get(alias, [])
+        panel, pin = asegurar_panel(alias)
+        tiene_oauth = bool(cli.get("access_token"))
+        oauth = link_oauth(alias)
+        if tiene_oauth:
+            estado_mp = '<span class="ok">MercadoPago conectado</span>'
+        elif oauth:
+            estado_mp = f'<a class="btn mini" href="{oauth}" target="_blank">Conectar su MercadoPago</a>'
+        else:
+            estado_mp = '<span class="warn">Falta cargar MP_CLIENT_ID / MP_CLIENT_SECRET en Railway</span>'
+        n = len(maquinas) + 1
+        sugerido = f"{alias}{n:02d}"
+        bloques += f"""
+  <section class="cli">
+    <h2>{_esc(cli.get('nombre') or alias)} <small class="mut">{_esc(alias)}</small></h2>
+    <p class="meta">{estado_mp}
+       · Panel del cliente: <a href="{panel}" target="_blank">{panel}</a>
+       · PIN {_esc(pin)}</p>
+    {tabla_maquinas(maquinas)}
+    {form_maquina(alias, sugerido, tiene_oauth)}
+  </section>"""
+
+    propias = por_cliente.get("", [])
+    if propias:
+        bloques += f"""
+  <section class="cli">
+    <h2>TermoPago <small class="mut">máquinas propias</small></h2>
+    {tabla_maquinas(propias)}
+    {form_maquina("", "caja01", False)}
+  </section>"""
+
+    total_maq = len(dispositivos)
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TermoPago — Administración</title>
+<style>
+  :root {{ --azul:#009ee3; --borde:#e2e6ea; --texto:#1c2430; --mut:#6b7785; }}
+  * {{ box-sizing:border-box; }}
+  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--texto);
+         background:#f6f8fa; margin:0; padding:24px 16px 64px; }}
+  .wrap {{ max-width:900px; margin:0 auto; }}
+  h1 {{ font-size:22px; margin:0 0 4px; }}
+  h2 {{ font-size:18px; margin:0 0 6px; }}
+  .mut {{ color:var(--mut); font-weight:400; }}
+  .ok {{ color:#2e7d32; font-weight:600; }}
+  .warn {{ color:#c62828; }}
+  .meta {{ font-size:13px; color:var(--mut); margin:0 0 14px; word-break:break-all; }}
+  .meta a {{ color:var(--azul); }}
+  section.cli, .caja {{ background:#fff; border:1px solid var(--borde); border-radius:10px;
+                       padding:16px; margin-bottom:18px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:14px; }}
+  th {{ text-align:left; font-size:12px; text-transform:uppercase; color:var(--mut);
+        border-bottom:1px solid var(--borde); padding:6px 8px 6px 0; }}
+  td {{ padding:10px 8px 10px 0; border-bottom:1px solid var(--borde); vertical-align:top; }}
+  td.acc {{ white-space:nowrap; text-align:right; }}
+  td.acc form {{ display:inline; }}
+  code {{ background:#f0f3f6; padding:1px 5px; border-radius:4px; font-size:12px; }}
+  .btn {{ display:inline-block; background:var(--azul); color:#fff; border:none; border-radius:6px;
+          padding:11px 16px; font-size:15px; text-decoration:none; cursor:pointer; }}
+  .btn.mini {{ padding:5px 10px; font-size:12px; margin-left:4px; }}
+  .btn.gris {{ background:#788; }}
+  .btn.rojo {{ background:#c62828; }}
+  details.alta {{ margin-top:14px; }}
+  summary {{ cursor:pointer; color:var(--azul); font-size:14px; }}
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-top:12px; }}
+  .grid label {{ display:block; font-size:13px; }}
+  .grid input, .grid select {{ width:100%; padding:9px; font-size:15px; margin-top:4px;
+                               border:1px solid var(--borde); border-radius:6px; }}
+  .grid button {{ grid-column:1/-1; }}
+  .msg {{ background:#fff; border-left:4px solid var(--azul); padding:12px 14px; border-radius:6px;
+          margin-bottom:18px; font-size:14px; }}
+  .vacio {{ color:var(--mut); font-size:14px; margin:6px 0; }}
+  .links a {{ color:var(--azul); font-size:13px; margin-right:14px; }}
+  @media (max-width:560px) {{
+    th:nth-child(3), td:nth-child(3) {{ display:none; }}
+    td.acc {{ text-align:left; }}
+  }}
+</style></head><body><div class="wrap">
+<h1>⚙️ TermoPago — Administración</h1>
+<p class="meta">{len(clientes)} cliente(s) · {total_maq} máquina(s)</p>
+{f'<div class="msg">{mensaje}</div>' if mensaje else ''}
+
+<div class="caja">
+  <h2>Nuevo cliente</h2>
+  <form method="post" class="grid">
+    <input type="hidden" name="accion" value="nuevo_cliente">
+    <label>Alias <small class="mut">(corto, sin espacios: villagas)</small>
+      <input name="alias" required></label>
+    <label>Nombre del negocio
+      <input name="nombre" placeholder="Estación Villagas"></label>
+    <button class="btn" type="submit">Crear cliente</button>
+  </form>
+</div>
+
+{bloques}
+
+<p class="links">
+  <a href="/config/{clave}">Precios y tiempos</a>
+  <a href="/estado/{clave}">Estado de equipos</a>
+  <a href="/estadisticas/{clave}">Estadísticas</a>
+  <a href="/historial/{clave}">Historial</a>
+  <a href="/cortes/{clave}">Cortes</a>
+</p>
+</div></body></html>"""
+
+
+@app.route("/admin/<clave>/maquina/<disp_id>")
+def admin_maquina(clave, disp_id):
+    """Ficha de flasheo de un equipo: todo lo que hay que saber para dejarlo
+    andando, sin abrir el código."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    disp = get_dispositivo(disp_id)
+    if not disp:
+        return "No existe esa máquina", 404
+
+    tipo = disp.get("tipo") or "legacy"
+    esp = disp.get("esp_id") or disp_id
+    sketch = sketch_de(tipo)
+    hermanas = sorted(cajas_hermanas(disp_id))
+    color, txt, hace = _estado_caja(disp, ahora_ar())
+    unidad = ("fichas por pago" if tipo == "fichas" else "segundos de servicio")
+
+    if tipo == "legacy":
+        aviso = ('<p class="warn">Esta caja es del sistema viejo por polling HTTPS. '
+                 'Cambiale el tipo desde el panel antes de flashear un equipo MQTT.</p>')
+    else:
+        aviso = ""
+
+    otras = ""
+    if len(hermanas) > 1:
+        lista = ", ".join(f"<code>{_esc(h)}</code>" for h in hermanas)
+        otras = (f'<p class="nota">Este ESP (<code>{_esc(esp)}</code>) maneja {len(hermanas)} cajas: {lista}. '
+                 f'Cargá todas en el portal, separadas por coma, en el mismo orden que los canales.</p>')
+
+    ids_portal = ",".join(hermanas) if len(hermanas) > 1 else disp_id
+
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flashear {_esc(disp['nombre'])}</title>
+<style>
+  body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#f6f8fa;
+         color:#1c2430; margin:0; padding:24px 16px 64px; }}
+  .wrap {{ max-width:720px; margin:0 auto; }}
+  .caja {{ background:#fff; border:1px solid #e2e6ea; border-radius:10px; padding:18px; margin-bottom:18px; }}
+  h1 {{ font-size:21px; margin:0 0 4px; }}
+  h2 {{ font-size:16px; margin:0 0 10px; }}
+  .mut {{ color:#6b7785; }}
+  .warn {{ color:#c62828; }}
+  code {{ background:#f0f3f6; padding:2px 6px; border-radius:4px; }}
+  .grande {{ display:block; font-size:24px; font-weight:700; letter-spacing:.5px;
+             background:#f0f3f6; border:1px dashed #b9c2cc; border-radius:8px;
+             padding:14px; margin:10px 0; text-align:center; word-break:break-all; }}
+  ol {{ padding-left:20px; line-height:1.75; }}
+  dl {{ display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:14px; margin:0; }}
+  dt {{ color:#6b7785; }}
+  dd {{ margin:0; }}
+  .btn {{ display:inline-block; background:#009ee3; color:#fff; border-radius:6px;
+          padding:11px 16px; text-decoration:none; }}
+  .nota {{ font-size:14px; background:#fff8e1; border-left:4px solid #f9a825;
+           padding:10px 12px; border-radius:6px; }}
+  a.volver {{ color:#009ee3; font-size:14px; }}
+</style></head><body><div class="wrap">
+<p><a class="volver" href="/admin/{clave}">← Volver al panel</a></p>
+<h1>{_esc(disp['nombre'])}</h1>
+<p class="mut">{txt} · último contacto {hace}</p>
+{aviso}
+
+<div class="caja">
+  <h2>1 · Abrí este sketch en el Arduino IDE</h2>
+  <p><code>termopago/firmware/{_esc(sketch or '—')}/</code></p>
+  <p class="mut">Es el mismo archivo para todas las máquinas de tipo <b>{_esc(tipo)}</b>.
+     No hay que editar nada del código.</p>
+  <p><a class="btn" href="/admin/{clave}/firmware/{_esc(disp_id)}.zip?secretos=1">
+     Descargar el .zip listo para compilar</a></p>
+  <p class="mut" style="font-size:13px">El .zip incluye <code>secretos_privado.h</code> ya completo
+     con el broker y el backend. No lo compartas ni lo subas al repo.</p>
+</div>
+
+<div class="caja">
+  <h2>2 · Flasheá y cargá el ID en el portal</h2>
+  <ol>
+    <li>Subí el sketch al ESP32.</li>
+    <li>Al arrancar levanta el portal WiFi <code>TermoPago-setup</code> (clave <code>termopago</code>).</li>
+    <li>Conectate con el celular y cargá la red WiFi del lugar y este ID de caja:</li>
+  </ol>
+  <span class="grande">{_esc(ids_portal)}</span>
+  {otras}
+  <p class="mut">El ID queda guardado en el ESP. Para cambiarlo, mantené apretado
+     el botón BOOT durante los primeros 5 segundos del arranque.</p>
+</div>
+
+<div class="caja">
+  <h2>3 · Datos de esta caja</h2>
+  <dl>
+    <dt>ID</dt><dd><code>{_esc(disp_id)}</code></dd>
+    <dt>Tipo</dt><dd>{_esc(TIPOS.get(tipo, tipo))}</dd>
+    <dt>ESP</dt><dd><code>{_esc(esp)}</code>{'' if disp.get('canal') is None else f' · canal {disp["canal"]}'}</dd>
+    <dt>Cliente</dt><dd>{_esc(disp.get('cliente') or 'TermoPago (cuenta propia)')}</dd>
+    <dt>Cobro</dt><dd>${float(disp['precio']):g} por {int(disp['segundos'])} {unidad}</dd>
+    <dt>Topic cmd</dt><dd><code>termopago/{_esc(disp_id)}/cmd</code></dd>
+    <dt>Topic status</dt><dd><code>termopago/{_esc(disp_id)}/status</code></dd>
+    <dt>Caja MP</dt><dd><code>{_esc(disp.get('external_pos_id'))}</code></dd>
+  </dl>
+</div>
+
+<div class="caja">
+  <h2>4 · Probar sin poner plata</h2>
+  <p><a class="btn" href="/simular_pago/{clave}/{int(disp['segundos'])}/{_esc(disp_id)}">Simular un pago</a></p>
+  <p class="mut" style="font-size:13px">Manda el comando MQTT igual que un pago real.
+     Si la máquina no reacciona, mirá <a href="/diag_caja/{clave}/{_esc(disp_id)}">el diagnóstico</a>.</p>
+</div>
+</div></body></html>"""
+
+
+@app.route("/admin/<clave>/firmware/<disp_id>.zip")
+def admin_firmware(clave, disp_id):
+    """Arma un .zip con la carpeta del sketch que le toca a esa máquina, lista
+    para descomprimir y abrir en el Arduino IDE. Con ?secretos=1 le mete adentro
+    un secretos_privado.h completo con las credenciales del broker (que en el
+    repo publico estan gitignoreadas)."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    disp = get_dispositivo(disp_id)
+    if not disp:
+        return "No existe esa máquina", 404
+    tipo = disp.get("tipo") or "legacy"
+    sketch = sketch_de(tipo)
+    carpeta = os.path.join(FIRMWARE_DIR, sketch) if sketch else None
+    if not carpeta or not os.path.isdir(carpeta):
+        return (f"No encuentro el sketch para el tipo '{tipo}' "
+                f"(esperaba firmware/{sketch}/ en el repo).", 404)
+
+    hermanas = sorted(cajas_hermanas(disp_id))
+    ids_portal = ",".join(hermanas)
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as z:
+        for raiz, _dirs, archivos in os.walk(carpeta):
+            for a in archivos:
+                # secretos_privado.h real nunca viaja desde el repo: si lo piden,
+                # se genera abajo desde las variables de entorno.
+                if a == "secretos_privado.h":
+                    continue
+                completo = os.path.join(raiz, a)
+                rel = os.path.relpath(completo, carpeta)
+                z.write(completo, os.path.join(sketch, rel))
+
+        if request.args.get("secretos") == "1":
+            if not (MQTT_HOST and MQTT_USER and MQTT_PASS):
+                return "Faltan MQTT_HOST / MQTT_USER / MQTT_PASS en Railway", 400
+            z.writestr(os.path.join(sketch, "secretos_privado.h"), f"""/*  secretos_privado.h — generado por el panel de TermoPago
+    NO subir al repo (ya esta en .gitignore). */
+#ifndef SECRETOS_PRIVADO_H
+#define SECRETOS_PRIVADO_H
+
+#define MQTT_HOST     "{MQTT_HOST}"
+#define MQTT_PORT     {MQTT_PORT}
+#define MQTT_USER     "{MQTT_USER}"
+#define MQTT_PASS     "{MQTT_PASS}"
+
+#define BACKEND_HOST  "{BASE_URL.replace('https://', '').replace('http://', '')}"
+
+#endif
+""")
+
+        z.writestr(f"{sketch}/LEEME_{disp_id}.txt", f"""FLASHEO — {disp['nombre']}  ({disp_id})
+{'=' * 60}
+
+1. Descomprimí esta carpeta y abrí {sketch}/{sketch}.ino en el Arduino IDE.
+   NO hay que editar el codigo: el ID de caja se carga desde el portal WiFi.
+
+2. Subilo al ESP32.
+
+3. Al arrancar levanta el portal WiFi "TermoPago-setup" (clave: termopago).
+   Conectate con el celular y cargá:
+       - la red WiFi del lugar y su clave
+       - ID de caja:   {ids_portal}
+
+   {'Este ESP maneja varias cajas: cargá los IDs separados por coma, en el' if len(hermanas) > 1 else ''}
+   {'mismo orden que los canales del esclavo.' if len(hermanas) > 1 else ''}
+
+4. Listo. En el LCD tiene que aparecer "WiFi conectado / Escanee el QR".
+   Para volver a cambiar el ID: mantené el botón BOOT durante los primeros
+   5 segundos del arranque y vuelve a levantar el portal.
+
+DATOS DE ESTA CAJA
+   tipo .............. {tipo}
+   ESP ............... {disp.get('esp_id') or disp_id}
+   canal ............. {'—' if disp.get('canal') is None else disp['canal']}
+   cliente ........... {disp.get('cliente') or 'TermoPago (cuenta propia)'}
+   precio ............ ${float(disp['precio']):g}
+   por pago .......... {int(disp['segundos'])} {'ficha(s)' if tipo == 'fichas' else 'segundos'}
+   topic cmd ......... termopago/{disp_id}/cmd
+   topic status ...... termopago/{disp_id}/status
+
+Librerias necesarias (Gestor de librerias del Arduino IDE):
+   WiFiManager (tzapu) · PubSubClient (Nick O'Leary) · ArduinoJson (Benoit
+   Blanchon) · hd44780 (Bill Perry, solo si el equipo lleva LCD)
+
+Generado por el panel de TermoPago el {ahora_ar().strftime('%d/%m/%Y %H:%M')}.
+""")
+
+    buf.seek(0)
+    from flask import Response
+    return Response(
+        buf.getvalue(),
+        mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="firmware_{disp_id}.zip"'},
+    )
+
+
 @app.route("/crear_dispositivo/<clave>/<disp_id>/<nombre>")
 @app.route("/crear_dispositivo/<clave>/<disp_id>/<nombre>/<token_env>")
 def crear_dispositivo(clave, disp_id, nombre, token_env=None):
@@ -1087,23 +1799,50 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
     El nombre no puede tener espacios: usar guiones (Poste-de-inflado)."""
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
+    # Tipo/ESP opcionales por query string, para poder dar de alta una caja
+    # completa desde la URL: ...?tipo=fichas&esp=villagas_esp1&canal=0
+    resultado = alta_dispositivo(
+        disp_id, nombre, token_env,
+        tipo=request.args.get("tipo"),
+        esp_id=request.args.get("esp"),
+        canal=request.args.get("canal"),
+    )
+    if "error" in resultado:
+        return jsonify(resultado), resultado.pop("_http", 400)
+    return jsonify(resultado)
 
+
+def alta_dispositivo(disp_id, nombre, token_env=None, tipo=None, esp_id=None,
+                     canal=None, precio=None, valor=None):
+    """Crea (o re-apunta) una caja: la da de alta en la cuenta de MercadoPago
+    que corresponda, la guarda en 'dispositivos' con su tipo y su ESP, y le arma
+    el QR. La usan la ruta /crear_dispositivo y el panel /admin.
+    Devuelve un dict: con 'error' si algo falló, si no los datos de la caja."""
     # token_env puede ser:  MP_TOKEN_XXX (variable de Railway)  o  cliente_ALIAS (OAuth)
     cliente_alias = None
     if token_env and token_env.startswith("cliente_"):
         cliente_alias = token_env[len("cliente_"):]
         token = token_cliente(cliente_alias)
         if not token:
-            return jsonify({"error": f"El cliente '{cliente_alias}' no está conectado (usar /conectar_cliente)"}), 400
+            return {"error": f"El cliente '{cliente_alias}' no está conectado (usar /conectar_cliente)", "_http": 400}
         token_env = None
     elif token_env and not os.environ.get(token_env):
-        return jsonify({"error": f"La variable {token_env} no existe en Railway"}), 400
+        return {"error": f"La variable {token_env} no existe en Railway", "_http": 400}
     else:
         token = os.environ.get(token_env) if token_env else MP_TOKEN
 
     nombre = nombre.replace("-", " ")
     existente = get_dispositivo(disp_id)
     external_id = "".join(c for c in disp_id.upper() if c.isalnum())[:40]
+
+    # Tipo: el que pidan, el que ya tenía, o 'sostenida' (el caso más común).
+    if tipo not in TIPOS:
+        tipo = (existente.get("tipo") if existente else None) or "sostenida"
+    esp_id = (esp_id or "").strip() or (existente.get("esp_id") if existente else None) or disp_id
+    try:
+        canal = int(canal) if canal not in (None, "") else (existente.get("canal") if existente else None)
+    except (ValueError, TypeError):
+        canal = None
 
     # Buscar caja existente en esa cuenta con ese external_id
     r = requests.get("https://api.mercadopago.com/pos", params={"external_id": external_id}, headers=mp_headers(token))
@@ -1121,7 +1860,7 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
             r = requests.get("https://api.mercadopago.com/users/me", headers=mp_headers(token))
             duenio_id = r.json().get("id")
             if not duenio_id:
-                return jsonify({"error": "Token inválido", "detalle": r.json()}), 400
+                return {"error": "Token inválido", "detalle": r.json(), "_http": 400}
             sucursal = {
                 "name": f"Sucursal {nombre}",
                 "business_hours": {
@@ -1145,7 +1884,7 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
             )
             store = r1.json()
             if "id" not in store:
-                return jsonify({"error": "No se pudo crear la sucursal", "detalle": store}), 400
+                return {"error": "No se pudo crear la sucursal", "detalle": store, "_http": 400}
             store_id = int(store["id"])
         caja = {
             "name": f"Caja {nombre}",
@@ -1157,15 +1896,32 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
         r2 = requests.post("https://api.mercadopago.com/pos", json=caja, headers=mp_headers(token))
         pos = r2.json()
         if "id" not in pos:
-            return jsonify({"error": "No se pudo crear la caja", "detalle": pos}), 400
+            return {"error": "No se pudo crear la caja", "detalle": pos, "_http": 400}
+
+    # Valor por defecto del campo 'segundos' segun el tipo: una expendedora
+    # cuenta FICHAS por pago, las demas cuentan SEGUNDOS de servicio.
+    try:
+        precio_ini = float(precio) if precio not in (None, "") else None
+    except (ValueError, TypeError):
+        precio_ini = None
+    try:
+        valor_ini = int(valor) if valor not in (None, "") else None
+    except (ValueError, TypeError):
+        valor_ini = None
+    if precio_ini is None:
+        precio_ini = float(existente["precio"]) if existente else 500.0
+    if valor_ini is None:
+        valor_ini = int(existente["segundos"]) if existente else (1 if tipo == "fichas" else 300)
 
     if not existente:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO dispositivos (id, nombre, external_pos_id, precio, segundos, token_env, cliente) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-            (disp_id, nombre, external_id, 500, (1 if disp_id in ESTACIONES_FICHAS else 300), token_env, cliente_alias)
+            "INSERT INTO dispositivos (id, nombre, external_pos_id, precio, segundos, token_env, "
+            "cliente, tipo, esp_id, canal, creado) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (disp_id, nombre, external_id, precio_ini, valor_ini, token_env,
+             cliente_alias, tipo, esp_id, canal, ahora_ar().isoformat())
         )
         conn.commit()
         cur.close()
@@ -1176,25 +1932,39 @@ def crear_dispositivo(clave, disp_id, nombre, token_env=None):
         # Limpiamos la orden vieja (era de la otra cuenta) para que rearmar_qr cree
         # una nueva en la cuenta nueva sin intentar reconciliar la anterior.
         actualizar_dispositivo(disp_id, {
+            "nombre": nombre,
             "external_pos_id": external_id,
             "token_env": token_env,
             "cliente": cliente_alias,
+            "tipo": tipo,
+            "esp_id": esp_id,
+            "canal": canal,
+            "precio": precio_ini,
+            "segundos": valor_ini,
             "orden_qr_id": None,
             "ultimo_rearme": None,
         })
 
+    # El tipo cambia como se comporta la caja en todo el backend: que el cache
+    # lo vea YA, antes de armar el QR.
+    invalidar_cache_tipos()
     disp = get_dispositivo(disp_id)
     rearmar_qr(disp)
 
-    return jsonify({
+    return {
         "dispositivo": disp_id,
         "nombre": nombre,
+        "tipo": tipo,
+        "esp_id": esp_id,
+        "canal": canal,
+        "cliente": cliente_alias,
         "caja_id": pos["id"],
         "external_pos_id": external_id,
         "qr_imagen": pos.get("qr", {}).get("image"),
         "qr_pdf": pos.get("qr", {}).get("template_document"),
-        "nota": f"Precio y tiempo se ajustan en /config (por defecto $500 / 5 min)"
-    })
+        "nota": ("Fichas por pago" if tipo == "fichas" else "Tiempo") +
+                f" y precio se ajustan en /config (quedo en ${precio_ini:g} / {valor_ini})",
+    }
 
 @app.route("/diag_caja/<clave>/<disp_id>")
 def diag_caja(clave, disp_id):
