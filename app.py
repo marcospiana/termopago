@@ -1617,6 +1617,41 @@ def admin_maquina(clave, disp_id):
 
     ids_portal = ",".join(hermanas) if len(hermanas) > 1 else disp_id
 
+    # QR fisico de la caja: lo genera MercadoPago al crearla y no cambia nunca
+    # (el que rota es la ORDEN que cuelga de la caja, no la imagen). Lo pedimos
+    # a MP en vivo para no guardar una URL que se puede vencer.
+    qr_img = qr_pdf = None
+    qr_error = ""
+    try:
+        _r = requests.get("https://api.mercadopago.com/pos",
+                          params={"external_id": disp.get("external_pos_id")},
+                          headers=mp_headers(token_de(disp)), timeout=10)
+        _cajas = _r.json().get("results", []) if _r.status_code == 200 else []
+        if _cajas:
+            qr_img = _cajas[0].get("qr", {}).get("image")
+            qr_pdf = _cajas[0].get("qr", {}).get("template_document")
+        else:
+            qr_error = (f"MercadoPago no devolvio ninguna caja con external_id "
+                        f"'{_esc(disp.get('external_pos_id'))}' (respondio {_r.status_code}).")
+    except Exception as _e:
+        qr_error = f"No pude consultar MercadoPago ahora: {_esc(_e)}"
+
+    if qr_img:
+        bloque_qr = f"""
+  <p class="mut">Este es el QR que va pegado en la máquina. No cambia nunca:
+     lo que se renueva solo cada pocos minutos es la orden de cobro que cuelga
+     de él, no la imagen.</p>
+  <p><img src="{qr_img}" alt="QR de {_esc(disp['nombre'])}" class="qr"></p>
+  <p>
+    <a class="btn" href="{qr_img}" target="_blank">Abrir la imagen</a>
+    {f'<a class="btn gris" href="{qr_pdf}" target="_blank">PDF para imprimir</a>' if qr_pdf else ''}
+  </p>"""
+    else:
+        bloque_qr = (f'<p class="warn">{qr_error}</p>'
+                     '<p class="mut">Probá de nuevo en un minuto. Si sigue igual, '
+                     f'mirá <a href="/diag_caja/{clave}/{_esc(disp_id)}">el diagnóstico</a>: '
+                     'suele ser que la caja quedó en otra cuenta de MercadoPago.</p>')
+
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1643,6 +1678,8 @@ def admin_maquina(clave, disp_id):
   .nota {{ font-size:14px; background:#fff8e1; border-left:4px solid #f9a825;
            padding:10px 12px; border-radius:6px; }}
   a.volver {{ color:#009ee3; font-size:14px; }}
+  .qr {{ width:240px; max-width:100%; height:auto; border:1px solid #e2e6ea;
+         border-radius:8px; background:#fff; padding:8px; }}
 </style></head><body><div class="wrap">
 <p><a class="volver" href="/admin/{clave}">← Volver al panel</a></p>
 <h1>{_esc(disp['nombre'])}</h1>
@@ -1688,7 +1725,12 @@ def admin_maquina(clave, disp_id):
 </div>
 
 <div class="caja">
-  <h2>4 · Probar sin poner plata</h2>
+  <h2>4 · El QR para pegar en la máquina</h2>
+  {bloque_qr}
+</div>
+
+<div class="caja">
+  <h2>5 · Probar sin poner plata</h2>
   <p><a class="btn" href="/simular_pago/{clave}/{int(disp['segundos'])}/{_esc(disp_id)}">Simular un pago</a></p>
   <p class="mut" style="font-size:13px">Manda el comando MQTT igual que un pago real.
      Si la máquina no reacciona, mirá <a href="/diag_caja/{clave}/{_esc(disp_id)}">el diagnóstico</a>.</p>

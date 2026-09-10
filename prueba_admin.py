@@ -230,6 +230,18 @@ chequear("ficha de ESP compartido lista las 2 cajas", b"lavadero02" in r.data)
 chequear("ficha con clave mala -> 403", c.get("/admin/mala/maquina/lavadero01").status_code == 403)
 chequear("ficha de maquina inexistente -> 404", c.get(f"/admin/{K}/maquina/nada").status_code == 404)
 
+chequear("la ficha muestra el QR de la caja", b'class="qr"' in r.data)
+chequear("y ofrece el PDF para imprimir", b"PDF para imprimir" in r.data)
+
+# MercadoPago caido: la ficha tiene que seguir sirviendo para flashear.
+_get_real = requests.get
+requests.get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("MP caido"))
+r = c.get(f"/admin/{K}/maquina/lavadero01")
+chequear("con MP caido la ficha igual carga", r.status_code == 200, r.status_code)
+chequear("y sigue mostrando el ID a cargar en el portal", b"lavadero01" in r.data)
+chequear("avisa que no pudo traer el QR", "No pude consultar MercadoPago".encode() in r.data)
+requests.get = _get_real
+
 r = c.get(f"/admin/{K}/firmware/lavadero03.zip?secretos=1")
 if r.status_code == 200:
     import io as _io, zipfile
