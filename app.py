@@ -2192,7 +2192,10 @@ def config_panel(clave):
   button {{ margin-top: 20px; width: 100%; padding: 14px; font-size: 18px;
            background: #009ee3; color: white; border: none; border-radius: 6px; }}
   .msg {{ margin-top: 16px; font-size: 16px; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>⚙️ TermoPago</h2>
 <form method="post">
 {filas}
@@ -2322,7 +2325,10 @@ def reinicios(clave):
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #e0e0e0; padding: 8px 10px; font-size:14px; text-align:left; }}
   th {{ background:#009ee3; color:white; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>🔁 Reinicios del equipo</h2>
 <div class="sub">Cada vez que el ESP arranca reporta por qué se reinició y cuánto estuvo
 activo antes. Los que están en <b style="color:#c62828">rojo</b> son fallas (colgado, pico
@@ -2400,7 +2406,10 @@ def cortes(clave):
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #e0e0e0; padding: 8px 10px; font-size:14px; text-align:left; }}
   th {{ background:#009ee3; color:white; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>📉 Cortes de conexión</h2>
 <div class="sub">Cada vez que un equipo se queda sin llegar al servidor por más de 30 seg,
 queda registrado acá al reconectar. Hora de Argentina.</div>
@@ -2461,7 +2470,10 @@ def estado(clave):
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #e0e0e0; padding: 10px; font-size: 15px; text-align:left; }}
   th {{ background: #009ee3; color:white; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>📡 Estado de equipos</h2>
 <div class="sub">Se actualiza solo cada 30 seg · hora de Argentina<br>
 🟢 conectado (&lt;90s) · 🟡 intermitente · 🔴 caído (&gt;10min)</div>
@@ -2626,7 +2638,10 @@ def estadisticas(clave):
   th {{ background: #eaf4fb; color:#1b4f72; }}
   tr:nth-child(even) td {{ background: #f7f9fb; }}
   .nota {{ color:#888; font-size:12px; margin-top:20px; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>📊 TermoPago — Ventas</h2>
 <div class="cards">
   {tarjeta("Hoy", tot_hoy)}
@@ -2707,7 +2722,10 @@ def historial(clave, cuantos=40):
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ border: 1px solid #e0e0e0; padding: 7px 9px; font-size: 14px; }}
   th {{ background: #009ee3; color:white; text-align:left; position:sticky; top:0; }}
+  .volver-admin {{ margin:0 0 14px; }}
+  .volver-admin a {{ color:#009ee3; font-size:14px; text-decoration:none; }}
 </style></head><body>
+<p class="volver-admin"><a href="/admin/{clave}">← Volver al panel</a></p>
 <h2>🧾 TermoPago — Historial</h2>
 <div class="sub">Últimos {len(ordenes)} movimientos · hora de Argentina ·
 "prueba" = simulación (no es dinero real)</div>

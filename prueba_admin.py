@@ -15,8 +15,28 @@ _conn_unica.row_factory = sqlite3.Row
 
 def _traducir(sql):
     sql = sql.replace("%s", "?")
+    sql = sql.replace("%%", "%")        # psycopg2 escapa el % literal como %%
     sql = re.sub(r"SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT", sql, flags=re.I)
     return sql
+
+
+def _expandir_tuplas(sql, args):
+    """psycopg2 adapta una tupla a (a,b,c) para un 'IN %s'; sqlite no sabe.
+    Expandimos la tupla a tantos ? como elementos tenga."""
+    if not args or not any(isinstance(a, (tuple, list)) for a in args):
+        return sql, args
+    partes = sql.split("?")
+    if len(partes) - 1 != len(args):
+        return sql, args
+    salida, planos = partes[0], []
+    for a, resto in zip(args, partes[1:]):
+        if isinstance(a, (tuple, list)):
+            salida += "(" + ",".join("?" * len(a)) + ")" + resto
+            planos.extend(a)
+        else:
+            salida += "?" + resto
+            planos.append(a)
+    return salida, planos
 
 
 class _Cur:
@@ -31,6 +51,7 @@ class _Cur:
                 if "duplicate column" in str(e):
                     return None
                 raise
+        s, args = _expandir_tuplas(s, args)
         return self._c.execute(s, args)
     def fetchone(self):
         r = self._c.fetchone()
@@ -286,6 +307,19 @@ print("\n== 9. /config sigue funcionando con los tipos nuevos ==")
 r = c.get(f"/config/{K}")
 chequear("config carga", r.status_code == 200, r.status_code)
 chequear("expendedora pide 'Fichas por pago'", "Fichas por pago".encode() in r.data)
+
+print("\n== 10. Todas las paginas de admin vuelven al panel ==")
+for ruta in ["config", "reinicios", "cortes", "estado", "estadisticas", "historial"]:
+    r = c.get(f"/{ruta}/{K}")
+    ok = r.status_code == 200 and f'href="/admin/{K}"'.encode() in r.data
+    chequear(f"/{ruta} tiene el link de volver", ok, f"status {r.status_code}")
+
+# El panel del cliente NO puede filtrar la clave secreta.
+cli = app.get_cliente("lavadero")
+r = c.get(f"/panel/{cli['panel_token']}")
+chequear("el panel del cliente carga", r.status_code == 200, r.status_code)
+chequear("y NO expone la clave ni un link al admin",
+         K.encode() not in r.data and b"/admin/" not in r.data)
 
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
