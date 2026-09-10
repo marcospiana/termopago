@@ -1524,6 +1524,10 @@ def admin_panel(clave):
   .warn {{ color:#c62828; }}
   .meta {{ font-size:13px; color:var(--mut); margin:0 0 14px; word-break:break-all; }}
   .meta a {{ color:var(--azul); }}
+  /* Un boton dentro de .meta tiene que seguir siendo blanco sobre azul:
+     sin esto, '.meta a' le gana por especificidad a '.btn' y el texto
+     desaparece contra el fondo. */
+  .meta a.btn {{ color:#fff; }}
   section.cli, .caja {{ background:#fff; border:1px solid var(--borde); border-radius:10px;
                        padding:16px; margin-bottom:18px; }}
   table {{ width:100%; border-collapse:collapse; font-size:14px; }}
