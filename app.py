@@ -3059,6 +3059,13 @@ def vigilar_equipos():
     while True:
         try:
             ahora = ahora_ar()
+            try:
+                _cx = get_db(); _cc = _cx.cursor()
+                _cc.execute("INSERT INTO config (clave, valor) VALUES ('vigilante_latido', %s) "
+                            "ON CONFLICT (clave) DO UPDATE SET valor=EXCLUDED.valor", (ahora.isoformat(),))
+                _cx.commit(); _cc.close(); _cx.close()
+            except Exception:
+                pass
             for caja in ESTACIONES_MQTT:
                 disp = get_dispositivo(caja)
                 if not disp:
@@ -3104,6 +3111,53 @@ def probar_telegram(clave):
         return "Falta TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Railway", 400
     ok = enviar_telegram("\u2705 Prueba de TermoPago: las alertas por Telegram funcionan.")
     return ("Enviado, fijate el Telegram" if ok else "Fallo el envio, revisa token/chat_id"), (200 if ok else 500)
+
+
+@app.route("/diag_alertas/<clave>")
+def diag_alertas(clave):
+    """Diagnostico de las alertas: si el vigilante esta vivo (latido) y que ve
+    por cada caja (gap, caido, alerta_caido)."""
+    if clave != CLAVE_SECRETA:
+        return "No autorizado", 403
+    ahora = ahora_ar()
+    latido = None
+    try:
+        cx = get_db(); cc = cx.cursor()
+        cc.execute("SELECT valor FROM config WHERE clave='vigilante_latido'")
+        r = cc.fetchone(); latido = r["valor"] if r else None
+        cc.close(); cx.close()
+    except Exception as e:
+        latido = f"error: {e}"
+    hace = None
+    try:
+        if latido and not str(latido).startswith("error"):
+            hace = int((ahora - datetime.fromisoformat(latido)).total_seconds())
+    except Exception:
+        hace = None
+    cajas = []
+    for caja in ESTACIONES_MQTT:
+        disp = get_dispositivo(caja)
+        if not disp:
+            continue
+        up = disp.get("ultimo_poll")
+        try:
+            gap = int((ahora - datetime.fromisoformat(up)).total_seconds()) if up else None
+        except (ValueError, TypeError):
+            gap = None
+        cajas.append({
+            "caja": caja,
+            "gap_seg": gap,
+            "caido": (gap is not None and gap > ALERTA_OFFLINE_S),
+            "alerta_caido": disp.get("alerta_caido"),
+        })
+    return jsonify({
+        "telegram_configurado": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
+        "alerta_offline_s": ALERTA_OFFLINE_S,
+        "vigilante_vivo": (hace is not None and hace < 120),
+        "vigilante_hace_seg": hace,
+        "vigilante_ultimo_latido": latido,
+        "cajas": cajas,
+    })
 
 threading.Thread(target=vigilar_ordenes, daemon=True).start()
 threading.Thread(target=mqtt_liveness_loop, daemon=True).start()
