@@ -47,6 +47,9 @@ TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip() or None
 # Sin latido por mas de esto (seg) -> se considera caido y avisa. 180 = 3 min
 # (3 latidos perdidos) para no dar falsas alarmas por un latido salteado.
 ALERTA_OFFLINE_S = int((os.environ.get("ALERTA_OFFLINE_S") or "180").strip() or "180")
+# Cada cuanto RECORDAR por Telegram que una maquina SIGUE caida (default 6 h),
+# para no olvidarse un equipo muerto varios dias.
+RECORDATORIO_CAIDO_S = int((os.environ.get("RECORDATORIO_CAIDO_S") or "21600").strip() or "21600")
 # Cada cuanto se re-arma el QR de las cajas MQTT. La orden se muere a los ~8 min,
 # asi que hay que re-armar antes. 240 = 4 min (2x de margen). Configurable en Railway.
 REARME_SEGUNDOS = int((os.environ.get("REARME_SEGUNDOS") or "240").strip() or "240")
@@ -3018,7 +3021,8 @@ def mqtt_liveness_loop():
             time.sleep(10)
 
 # ─── Alertas por Telegram: avisar cuando un equipo se cae / vuelve ───
-_alerta_estado = {}   # caja -> True si ya avisamos que esta caida
+_alerta_estado = {}        # caja -> True si ya avisamos que esta caida
+_alerta_ultimo_aviso = {}  # caja -> time.time() del ultimo aviso "se cayo"/"sigue caido"
 
 def enviar_telegram(texto):
     if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
@@ -3071,11 +3075,29 @@ def vigilar_equipos():
                 _n = disp.get("nombre")
                 # incluir el id de la caja para distinguir aspiradora01/02, soplado01/02, etc.
                 nombre = f"{_n} ({caja})" if _n and _n != caja else caja
-                if caido and not ya:
-                    _alerta_estado[caja] = True
-                    enviar_telegram(f"\U0001F534 <b>{nombre}</b> se cayo.\nSin conexion hace {int(gap//60)} min. Los QR de ese equipo no cobran hasta que vuelva.")
-                elif (not caido) and ya and gap < 90:
+
+                def _dur(seg):
+                    seg = int(seg)
+                    if seg >= 86400: return f"{seg // 86400} dia(s)"
+                    if seg >= 3600:  return f"{seg // 3600} h"
+                    return f"{seg // 60} min"
+
+                if caido:
+                    ahora_ts = time.time()
+                    if not ya:
+                        # recien se cae
+                        _alerta_estado[caja] = True
+                        _alerta_ultimo_aviso[caja] = ahora_ts
+                        enviar_telegram(f"\U0001F534 <b>{nombre}</b> se cayo.\nSin conexion hace {_dur(gap)}. Los QR de ese equipo no cobran hasta que vuelva.")
+                    elif ahora_ts - _alerta_ultimo_aviso.get(caja, 0) >= RECORDATORIO_CAIDO_S:
+                        # sigue caida: recordatorio periodico para no olvidarla
+                        _alerta_ultimo_aviso[caja] = ahora_ts
+                        enviar_telegram(f"\U0001F534 <b>{nombre}</b> SIGUE caida hace {_dur(gap)}. Revisar.")
+                elif ya:
+                    # volvio (gap < ALERTA_OFFLINE_S): limpiar la bandera SIEMPRE, sin
+                    # zona muerta, asi la proxima caida real vuelve a avisar.
                     _alerta_estado[caja] = False
+                    _alerta_ultimo_aviso.pop(caja, None)
                     enviar_telegram(f"\U0001F7E2 <b>{nombre}</b> volvio a estar online.")
         except Exception as e:
             print(f"Error en vigilancia de equipos: {e}")
