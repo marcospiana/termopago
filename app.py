@@ -3047,15 +3047,27 @@ def vigilar_equipos():
     if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
         print("Alertas: sin TELEGRAM_TOKEN/CHAT_ID -> no arranco el vigilante de equipos")
         return
-    try:
-        lock = get_db(); lock.autocommit = True
-        c = lock.cursor(); c.execute("SELECT pg_try_advisory_lock(918273646) AS ok")
-        got = c.fetchone()["ok"]; c.close()
-        if not got:
-            lock.close(); return
-    except Exception as e:
-        print(f"Alertas lock: {e}"); return
-    time.sleep(90)   # margen al arranque para no avisar durante un deploy/boot
+    # Adquirir el advisory lock CON REINTENTOS. En un deploy Railway solapa el
+    # contenedor viejo y el nuevo unos segundos, asi que el viejo todavia tiene
+    # el lock. Antes se intentaba UNA sola vez y, si fallaba, el vigilante hacia
+    # return y MORIA para siempre -> por eso dejaba de avisar tras cada deploy.
+    # Ahora reintenta cada 30s hasta que el contenedor viejo lo suelte.
+    _lock = None
+    while _lock is None:
+        try:
+            cx = get_db(); cx.autocommit = True
+            cc = cx.cursor(); cc.execute("SELECT pg_try_advisory_lock(918273646) AS ok")
+            ok = cc.fetchone()["ok"]; cc.close()
+            if ok:
+                _lock = cx          # mantener la conexion abierta para retener el lock
+            else:
+                cx.close()
+        except Exception as e:
+            print(f"Alertas lock: {e}")
+        if _lock is None:
+            time.sleep(30)
+    print("Alertas: vigilante de equipos ACTIVO")
+    time.sleep(90)   # margen para no avisar durante un deploy/boot
     while True:
         try:
             ahora = ahora_ar()
