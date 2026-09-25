@@ -275,6 +275,10 @@ def init_db():
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS esp_id TEXT")
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS canal INTEGER")
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS creado TEXT")
+    # alerta_caido: fecha del ultimo aviso "se cayo" por Telegram (NULL = no avisado).
+    # Persistido en DB para que sobreviva a deploys/reinicios (antes era RAM y se
+    # perdia -> no llegaba el "volvio" y se repetia el "se cayo" en cada deploy).
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS alerta_caido TEXT")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -3067,7 +3071,7 @@ def vigilar_equipos():
                 except (ValueError, TypeError):
                     continue
                 caido = gap > ALERTA_OFFLINE_S
-                ya = _alerta_estado.get(caja, False)
+                ya = bool(disp.get("alerta_caido"))   # persistido en DB
                 _n = disp.get("nombre")
                 # incluir el id de la caja para distinguir aspiradora01/02, soplado01/02, etc.
                 nombre = f"{_n} ({caja})" if _n and _n != caja else caja
@@ -3080,13 +3084,13 @@ def vigilar_equipos():
 
                 if caido and not ya:
                     # se cae: un solo aviso
-                    _alerta_estado[caja] = True
+                    actualizar_dispositivo(caja, {"alerta_caido": ahora.isoformat()})
                     enviar_telegram(f"\U0001F534 <b>{nombre}</b> se cayo.\nSin conexion hace {_dur(gap)}. Los QR de ese equipo no cobran hasta que vuelva.")
                 elif (not caido) and ya:
                     # volvio: un solo aviso, y limpia la bandera SIEMPRE (sin la zona
                     # muerta 90-180s de antes) para que la proxima caida real avise.
                     # Mientras sigue caida NO re-notifica (uno al caer, uno al volver).
-                    _alerta_estado[caja] = False
+                    actualizar_dispositivo(caja, {"alerta_caido": None})
                     enviar_telegram(f"\U0001F7E2 <b>{nombre}</b> volvio a estar online.")
         except Exception as e:
             print(f"Error en vigilancia de equipos: {e}")
