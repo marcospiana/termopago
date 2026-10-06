@@ -107,6 +107,18 @@
 #endif
 
 // --- Tiempos ---
+// Pulsos de COIN que hacen falta para pagar UNA ficha:
+//     DISP_PULSOS_POR_FICHA = PRECIO FICHA / ENTRADA COIN
+// Lo ideal es 1 (ENTRADA COIN = precio ficha, o = $0 que es equivalente), pero
+// no todas las placas lo permiten: en la de Villagas el menu ENTRADA COIN topea
+// en $250 y no acepta $0 ("codificado"), asi que con precio ficha $3000 van
+// 3000 / 250 = 12 pulsos exactos, sin resto ni credito colgado.
+// Elegir SIEMPRE una division exacta: si sobra resto, queda credito acumulandose
+// en la maquina y tarde o temprano alguien se lleva una ficha gratis.
+#ifndef DISP_PULSOS_POR_FICHA
+#define DISP_PULSOS_POR_FICHA     1
+#endif
+
 #ifndef DISP_PULSO_COIN_MS
 #define DISP_PULSO_COIN_MS      100      // nominal del RM5; la placa tolera 10 ms - 2 s
 #endif
@@ -219,17 +231,26 @@ class Dispensador {
 
     switch (_estado) {
       case DISP_COIN:
-        // Un unico pulso de moneda: acredita el valor de UNA ficha.
+        // Pulso de moneda. Hacen falta DISP_PULSOS_POR_FICHA para juntar el
+        // precio de UNA ficha (1 si ENTRADA COIN ya vale la ficha entera).
         if (ahora - _t0 >= DISP_PULSO_COIN_MS) {
           _releCoin(false);
-          _creditoCargado = true;     // desde aca hay plata en la maquina
+          _creditoCargado = true;     // desde el primer pulso hay plata en la maquina
           _pulsosCoin++;
+          _pulsosRestantes--;
           _ir(DISP_PAUSA);
         }
         break;
 
       case DISP_PAUSA:
-        if (ahora - _t0 >= DISP_PAUSA_COIN_MS) _ir(DISP_ACREDITA);
+        if (ahora - _t0 >= DISP_PAUSA_COIN_MS) {
+          if (_pulsosRestantes > 0) {
+            _releCoin(true);          // todavia falta plata: otro pulso
+            _ir(DISP_COIN);
+          } else {
+            _ir(DISP_ACREDITA);       // ya esta el precio completo
+          }
+        }
         break;
 
       case DISP_ACREDITA:
@@ -326,6 +347,7 @@ class Dispensador {
   int        _pedidas   = 0;
   int        _entregadas = 0;
   uint32_t   _fichasAlPulsar = 0;
+  int        _pulsosRestantes = 0;   // pulsos de COIN que faltan para esta ficha
   bool       _creditoCargado = false;
   uint32_t   _creditoVarado  = 0;
   uint32_t   _pulsosCoin     = 0;
@@ -348,6 +370,7 @@ class Dispensador {
     // de aca cuenta como la de este ciclo. Tomarla mas tarde se perderia la
     // ficha en el modo sin boton, donde la placa puede entregar apenas acredita.
     _fichasAlPulsar = _leerSensor();
+    _pulsosRestantes = DISP_PULSOS_POR_FICHA;
     _releCoin(true);
     _ir(DISP_COIN);
   }

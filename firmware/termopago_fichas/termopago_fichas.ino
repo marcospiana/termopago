@@ -120,7 +120,41 @@ String TOPIC_STATUS= "";   // termopago/<caja>/status  equipo  -> backend (+ LWT
 // 1 = verifica cada ficha con el sensor. Con el boton de por medio NO es
 // opcional: sin esto el ESP pulsa a ciegas contra una maquina que acumula
 // credito. Dejar en 0 solo mientras el PC817 todavia no este cableado.
-#define DISP_USAR_SENSOR  1
+#define DISP_USAR_SENSOR  0
+
+// Pulsos de MONEDERO por ficha = PRECIO FICHA / valor del pulso de monedero.
+// Villagas: PRECIO FICHA = $3000 y el monedero vale $100 por pulso, FIJO en el
+// firmware de la placa (se barrieron las 15 combinaciones de DIP: no existe
+// menu para cambiarlo). 3000 / 100 = 30 pulsos exactos, sin resto.
+//
+// NO intentar bajarlo con una PROMOCION. Se probo: la promo no dispara al
+// llegar al monto, lo que hace es cambiar el PRECIO de la ficha. Con una promo
+// de $200 el credito tiene que llegar igual a $3000 y despues cada pulsacion
+// del boton descuenta solo $200 => quien mete $3000 en billetes se lleva 15
+// fichas. La placa tiene un solo precio y no distingue de que canal vino la
+// plata, asi que abaratar la ficha para el ESP32 la abarata para todos.
+//
+// Los 100 ms / 250 ms de abajo estan probados contra esta placa. Se podrian
+// achicar para que la entrega tarde menos de los ~10 s que tarda hoy, pero
+// contar mal la plata es mucho peor que esperar: no tocarlos sin repetir la
+// prueba de las 10 fichas.
+#define DISP_PULSOS_POR_FICHA  30
+
+// Ancho del pulso de monedero y pausa entre pulsos.
+// Arranque: 100 / 250 ms (lo unico probado a mano contra esta placa) => los 30
+// pulsos tardaban 10,5 s. Bajado a 80 / 120 ms => 6,0 s, con margen sobre el
+// rele (cierra en ~10 ms, abre en ~5 ms, asi que no trabaja al limite).
+//
+// COMO VALIDAR UN CAMBIO ACA: pedir 1 ficha y mirar que el display marque
+// EXACTAMENTE $3000 antes de la pulsacion del boton. Si marca menos, se
+// perdieron pulsos. Repetirlo 5 veces, no una: el problema no es que falle
+// siempre, es que falle una de cada diez. Falla segura: sin $3000 no sale
+// ficha, no se pierde ni se regala plata.
+//
+// Para bajar mas hay que cambiar el rele por un PC817 en la linea COIN: el
+// rele no da para 50/50 ms y ademas es la fuente del riesgo de rebote.
+#define DISP_PULSO_COIN_MS      40
+#define DISP_PAUSA_COIN_MS      60
 
 #define DISP_MAX_FICHAS   20       // tope de fichas por pago (anti-vaciado)
 
