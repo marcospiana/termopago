@@ -534,6 +534,7 @@ String heartbeatJson(const char* estado) {
   doc["dispensador"]    = dispensador.estadoTxt();
   doc["credito_varado"] = dispensador.creditoVarado();
   doc["fichas_sensor"]  = dispensador.fichasVistas();
+  doc["pulsos_ficha"]   = dispensador.pulsosPorFicha();
   String out; serializeJson(doc, out);
   return out;
 }
@@ -578,6 +579,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
   // cantidad de fichas a entregar (editable desde /config del backend). Default 1.
   int cant = (int)(doc["cantidad"] | 1);
+
+  // pulsos de monedero por ficha: lo calcula el backend como
+  // PRECIO FICHA de la placa / valor del pulso. Permite cambiar el precio en la
+  // placa sin reflashear. Si no viene, se queda con el compilado.
+  int pulsos = (int)(doc["pulsos"] | 0);
+  if (pulsos > 0 && pulsos != dispensador.pulsosPorFicha()) {
+    dispensador.pulsosPorFicha(pulsos);
+    Serial.printf("[FICHAS] pulsos por ficha -> %d (del backend)\n",
+                  dispensador.pulsosPorFicha());
+  }
 
   // a la cola: si esta entregando, espera su turno; el loop lo activa al quedar libre
   encolarPago(pagoId, cant);

@@ -207,6 +207,17 @@ class Dispensador {
     _estado = DISP_REPOSO;
   }
 
+  // Pulsos de COIN por ficha. El backend lo manda en el cmd MQTT, calculado
+  // como PRECIO FICHA de la placa / valor del pulso de monedero. Asi el cliente
+  // puede cambiar el precio en la placa sin reflashear: si no se actualiza,
+  // el ESP cargaria de menos y la ficha no saldria nunca.
+  // Se ignora un valor fuera de rango: mejor seguir con el compilado que
+  // quedarse mudo por un payload raro.
+  void pulsosPorFicha(int n) {
+    if (n >= 1 && n <= 200) _pulsosPorFicha = n;
+  }
+  int pulsosPorFicha() const { return _pulsosPorFicha; }
+
   void alTerminar(CbFin cb)     { _cbFin = cb; }
   void alMostrar(CbMostrar cb)  { _cbMostrar = cb; }
 
@@ -348,6 +359,7 @@ class Dispensador {
   int        _entregadas = 0;
   uint32_t   _fichasAlPulsar = 0;
   int        _pulsosRestantes = 0;   // pulsos de COIN que faltan para esta ficha
+  int        _pulsosPorFicha  = DISP_PULSOS_POR_FICHA;   // lo pisa el backend
   bool       _creditoCargado = false;
   uint32_t   _creditoVarado  = 0;
   uint32_t   _pulsosCoin     = 0;
@@ -370,7 +382,7 @@ class Dispensador {
     // de aca cuenta como la de este ciclo. Tomarla mas tarde se perderia la
     // ficha en el modo sin boton, donde la placa puede entregar apenas acredita.
     _fichasAlPulsar = _leerSensor();
-    _pulsosRestantes = DISP_PULSOS_POR_FICHA;
+    _pulsosRestantes = _pulsosPorFicha;
     _releCoin(true);
     _ir(DISP_COIN);
   }

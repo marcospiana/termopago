@@ -180,6 +180,44 @@ ESTACIONES_PULSO = _CajasPorTipo({"pulso", "fichas"})
 # fichas; el campo "segundos" del dispositivo guarda cuantas fichas por pago.
 ESTACIONES_FICHAS = _CajasPorTipo({"fichas"})
 
+# Defaults de la expendedora de fichas (villagas01, placa Electrolacer 1.5).
+# Se usan cuando la maquina todavia no tiene los campos cargados en la DB.
+CREDITO_FICHA_DEFAULT = 3000.0   # PRECIO FICHA de la placa
+VALOR_PULSO_DEFAULT   = 100.0    # lo que acredita un pulso de monedero
+PULSOS_MAX            = 200      # tope de cordura
+
+class ConfigInvalida(ValueError):
+    """Error de validacion de /config con un mensaje para mostrarle al usuario."""
+
+
+def pulsos_por_ficha(disp):
+    """Pulsos de monedero que el ESP tiene que mandar para liberar UNA ficha.
+
+    Devuelve None si la division no da exacta o los valores no tienen sentido:
+    en ese caso NO se manda el campo y el ESP cae a su valor compilado, que es
+    mejor que mandarle un numero que deja credito colgado en la maquina."""
+    def _num(v, default):
+        # OJO: None/"" = columna sin cargar -> default. Pero un 0 guardado es un
+        # valor invalido, NO un "sin cargar": con `or` caia al default y un 0 se
+        # convertia en 100 en silencio. En un calculo de plata eso no va.
+        if v is None or v == "":
+            return default
+        return float(v)
+    try:
+        d = disp or {}
+        credito = _num(d.get("credito_ficha"), CREDITO_FICHA_DEFAULT)
+        valor   = _num(d.get("valor_pulso"),   VALOR_PULSO_DEFAULT)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if valor <= 0 or credito <= 0:
+        return None
+    n = credito / valor
+    if abs(n - round(n)) > 1e-9:          # no es exacta
+        return None
+    n = int(round(n))
+    return n if 1 <= n <= PULSOS_MAX else None
+
+
 def cajas_hermanas(caja):
     """Cajas que comparten el mismo ESP fisico (columna esp_id): si una se cae,
     estan TODAS caidas. Se usa para cancelar los QR de todas al irse offline."""
@@ -206,7 +244,14 @@ def publicar_activacion(caja_id, pago_id, segundos_override=None):
         segundos = int(disp["segundos"]) if disp and disp.get("segundos") else 90
     if caja_id in ESTACIONES_FICHAS:
         # expendedora: el campo "segundos" del disp guarda las fichas por pago
-        payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "cantidad": segundos})
+        cmd = {"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "cantidad": segundos}
+        # pulsos de monedero por ficha: sale del PRECIO FICHA cargado en la
+        # PLACA (editable en /config), no del precio del QR. Si no se puede
+        # calcular, no mandamos el campo y el ESP usa el que tiene compilado.
+        n_pulsos = pulsos_por_ficha(get_dispositivo(caja_id))
+        if n_pulsos:
+            cmd["pulsos"] = n_pulsos
+        payload = _json.dumps(cmd)
     else:
         payload = _json.dumps({"accion": "activar", "caja": caja_id, "pago_id": str(pago_id), "segundos": segundos})
     try:
@@ -279,6 +324,17 @@ def init_db():
     # Persistido en DB para que sobreviva a deploys/reinicios (antes era RAM y se
     # perdia -> no llegaba el "volvio" y se repetia el "se cayo" en cada deploy).
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS alerta_caido TEXT")
+    # credito_ficha / valor_pulso: SOLO para tipo 'fichas'.
+    #   credito_ficha -> cuanto credito necesita la placa Electrolacer para
+    #                    soltar UNA ficha (su PRECIO FICHA, el del DIP1). NO es
+    #                    el precio del QR: ese es la columna 'precio'.
+    #   valor_pulso   -> cuanto acredita cada pulso de monedero que manda el ESP
+    #                    (fijo en el firmware de la placa; en villagas01, $100).
+    # pulsos_por_ficha() = credito_ficha / valor_pulso, y tiene que dar EXACTO:
+    # si sobra resto, cada venta deja credito colgado en la maquina, se acumula
+    # y en algun momento alguien aprieta el boton y se lleva una ficha gratis.
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS credito_ficha REAL")
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS valor_pulso REAL")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -2228,9 +2284,33 @@ def config_panel(clave):
                     nuevos_segundos = int(request.form[f"minutos__{disp['id']}"]) * 60
                 if nuevo_precio <= 0 or nuevos_segundos <= 0:
                     raise ValueError
+                campos = {"precio": nuevo_precio, "segundos": nuevos_segundos}
+
+                # Expendedoras de fichas: credito que pide la PLACA por ficha y
+                # cuanto vale cada pulso de monedero. De ahi salen los pulsos
+                # que manda el ESP. Si esto queda mal, la ficha no sale.
+                if disp["id"] in ESTACIONES_FICHAS:
+                    credito = float(request.form[f"credito__{disp['id']}"])
+                    valor   = float(request.form[f"valorpulso__{disp['id']}"])
+                    if credito <= 0 or valor <= 0:
+                        raise ConfigInvalida(
+                            f"{disp['nombre']}: el crédito por ficha y el valor del pulso tienen que ser mayores a 0.")
+                    if credito % 100 or valor % 100:
+                        raise ConfigInvalida(
+                            f"{disp['nombre']}: el crédito por ficha y el valor del pulso tienen que ser múltiplos de $100.")
+                    if (credito / valor) != int(credito / valor):
+                        raise ConfigInvalida(
+                            f"{disp['nombre']}: ${credito:g} ÷ ${valor:g} no da exacto. "
+                            f"Si sobra resto queda crédito colgado en la máquina y termina regalando una ficha.")
+                    if not (1 <= int(credito / valor) <= PULSOS_MAX):
+                        raise ConfigInvalida(
+                            f"{disp['nombre']}: darían {int(credito / valor)} pulsos por ficha, fuera del rango 1–{PULSOS_MAX}.")
+                    campos["credito_ficha"] = credito
+                    campos["valor_pulso"]   = valor
+
                 precio_cambio = nuevo_precio != float(disp["precio"])
                 tiempo_cambio = nuevos_segundos != int(disp["segundos"])
-                actualizar_dispositivo(disp["id"], {"precio": nuevo_precio, "segundos": nuevos_segundos})
+                actualizar_dispositivo(disp["id"], campos)
                 # re-armar el QR si cambió el precio O el tiempo (los minutos
                 # van en la descripción del QR, así queda todo consistente)
                 if precio_cambio or tiempo_cambio:
@@ -2242,14 +2322,33 @@ def config_panel(clave):
                 mensaje = "✅ Guardado. QR re-armado: " + ", ".join(cambios)
             else:
                 mensaje = "✅ Guardado."
+        except ConfigInvalida as e:
+            mensaje = f"❌ {e} No se guardó nada."
         except (ValueError, KeyError):
             mensaje = "❌ Valores inválidos, no se guardó nada."
 
     filas = ""
     for disp in get_dispositivos():
+        campo_fichas = ""
         if disp["id"] in ESTACIONES_FICHAS:
             campo_tiempo = (f'<label>Fichas por pago</label>'
                             f'<input type="number" name="segundos__{disp["id"]}" min="1" value="{int(disp["segundos"])}">')
+            # Crédito que pide la placa por ficha + valor del pulso de monedero.
+            # De estos dos sale la cantidad de pulsos que manda el ESP.
+            _cred  = float(disp["credito_ficha"] or CREDITO_FICHA_DEFAULT)
+            _valor = float(disp["valor_pulso"]   or VALOR_PULSO_DEFAULT)
+            _n     = pulsos_por_ficha(disp)
+            _aviso = (f'<p class="ok">= {_n} pulsos por ficha</p>' if _n else
+                      '<p class="mal">La división no da exacta — revisá los valores</p>')
+            campo_fichas = f"""
+    <hr>
+    <label>Crédito por ficha en la placa (ARS)</label>
+    <input type="number" name="credito__{disp['id']}" step="100" min="100" value="{_cred:g}">
+    <small>El PRECIO FICHA cargado en la placa (DIP1), no el precio del QR. Múltiplo de $100.</small>
+    <label>Valor del pulso de monedero (ARS)</label>
+    <input type="number" name="valorpulso__{disp['id']}" step="100" min="100" value="{_valor:g}">
+    <small>Lo que acredita cada pulso que manda el ESP. Fijo en la placa. Múltiplo de $100.</small>
+    {_aviso}"""
         elif disp["id"] in ESTACIONES_MQTT:
             campo_tiempo = (f'<label>Tiempo del conteo (segundos)</label>'
                             f'<input type="number" name="segundos__{disp["id"]}" min="1" value="{int(disp["segundos"])}">')
@@ -2261,7 +2360,7 @@ def config_panel(clave):
     <legend>{disp['nombre']} <small>({disp['id']})</small></legend>
     <label>Precio (ARS)</label>
     <input type="number" name="precio__{disp['id']}" step="0.01" min="1" value="{float(disp['precio']):g}">
-    {campo_tiempo}
+    {campo_tiempo}{campo_fichas}
   </fieldset>"""
 
     return f"""<!doctype html>
@@ -2273,6 +2372,10 @@ def config_panel(clave):
   fieldset {{ margin-top: 16px; border: 1px solid #ccc; border-radius: 8px; padding: 12px; }}
   legend {{ font-weight: bold; padding: 0 6px; }}
   label {{ display: block; margin-top: 10px; }}
+  small {{ color: #666; display: block; margin-top: 2px; }}
+  hr {{ border: 0; border-top: 1px solid #ddd; margin: 14px 0 4px; }}
+  .ok {{ color: #137333; font-weight: bold; margin: 8px 0 0; }}
+  .mal {{ color: #c5221f; font-weight: bold; margin: 8px 0 0; }}
   input {{ width: 100%; padding: 10px; font-size: 18px; margin-top: 4px; box-sizing: border-box; }}
   button {{ margin-top: 20px; width: 100%; padding: 14px; font-size: 18px;
            background: #009ee3; color: white; border: none; border-radius: 6px; }}

@@ -378,5 +378,82 @@ chequear("el panel del cliente carga", r.status_code == 200, r.status_code)
 chequear("y NO expone la clave ni un link al admin",
          K.encode() not in r.data and b"/admin/" not in r.data)
 
+print("\n== 11. Pulsos por ficha (precio de la placa -> pulsos del ESP) ==")
+
+# El calculo puro. La division TIENE que dar exacta: si sobra resto queda
+# credito colgado en la maquina y termina regalando una ficha.
+def _d(credito, valor):
+    return {"credito_ficha": credito, "valor_pulso": valor}
+
+chequear("3000/100 = 30 pulsos", app.pulsos_por_ficha(_d(3000, 100)) == 30)
+chequear("4000/100 = 40 pulsos", app.pulsos_por_ficha(_d(4000, 100)) == 40)
+chequear("200/200 = 1 pulso",    app.pulsos_por_ficha(_d(200, 200)) == 1)
+chequear("sin datos cae al default 3000/100",
+         app.pulsos_por_ficha({"credito_ficha": None, "valor_pulso": None}) == 30)
+chequear("disp None cae al default", app.pulsos_por_ficha(None) == 30)
+chequear("division inexacta -> None (no se manda nada)",
+         app.pulsos_por_ficha(_d(3050, 100)) is None)
+chequear("valor_pulso 0 -> None", app.pulsos_por_ficha(_d(3000, 0)) is None)
+chequear("credito negativo -> None", app.pulsos_por_ficha(_d(-100, 100)) is None)
+chequear("mas de PULSOS_MAX -> None", app.pulsos_por_ficha(_d(999999, 100)) is None)
+
+# El cmd MQTT tiene que llevar los pulsos calculados, y solo en las de fichas.
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3000, "valor_pulso": 100})
+app.publicar_activacion("lavadero03", "pagoP1")
+chequear("el cmd de fichas lleva 'pulsos'", '"pulsos": 30' in capturado["p"], capturado["p"])
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 4500, "valor_pulso": 100})
+app.publicar_activacion("lavadero03", "pagoP2")
+chequear("cambiar el precio de la placa cambia los pulsos",
+         '"pulsos": 45' in capturado["p"], capturado["p"])
+app.publicar_activacion("lavadero01", "pagoP3")
+chequear("la sostenida NO lleva pulsos", "pulsos" not in capturado["p"], capturado["p"])
+
+# Si la config quedo mal, mejor no mandar el campo: el ESP usa el compilado.
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3050, "valor_pulso": 100})
+app.publicar_activacion("lavadero03", "pagoP4")
+chequear("config inexacta -> no manda pulsos (el ESP usa el compilado)",
+         "pulsos" not in capturado["p"], capturado["p"])
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3000, "valor_pulso": 100})
+
+print("\n== 12. /config valida el credito por ficha ==")
+r = c.get(f"/config/{K}")
+chequear("muestra el credito por ficha", "Cr\u00e9dito por ficha".encode() in r.data)
+chequear("muestra el valor del pulso", "Valor del pulso".encode() in r.data)
+chequear("muestra los pulsos calculados", b"30 pulsos por ficha" in r.data)
+chequear("aclara que es multiplo de 100", "M\u00faltiplo de $100".encode() in r.data)
+
+def _post(credito, valor="100"):
+    datos = {}
+    for d in app.get_dispositivos():
+        datos[f"precio__{d['id']}"] = f"{float(d['precio']):g}"
+        if d["id"] in app.ESTACIONES_MQTT:
+            datos[f"segundos__{d['id']}"] = str(int(d["segundos"]))
+        else:
+            datos[f"minutos__{d['id']}"] = str(max(1, int(d["segundos"]) // 60))
+        if d["id"] in app.ESTACIONES_FICHAS:
+            datos[f"credito__{d['id']}"] = str(credito)
+            datos[f"valorpulso__{d['id']}"] = str(valor)
+    return c.post(f"/config/{K}", data=datos)
+
+r = _post(4000)
+chequear("guarda un multiplo de 100", "Guardado".encode() in r.data)
+chequear("y quedo en la DB",
+         float(app.get_dispositivo("lavadero03")["credito_ficha"]) == 4000)
+
+r = _post(3050)
+chequear("rechaza un credito que no es multiplo de 100",
+         "m\u00faltiplos de $100".encode() in r.data)
+chequear("y NO piso lo que estaba guardado",
+         float(app.get_dispositivo("lavadero03")["credito_ficha"]) == 4000)
+
+r = _post(300, valor="200")
+chequear("rechaza division inexacta aunque los dos sean multiplos de 100",
+         "no da exacto".encode() in r.data)
+chequear("y tampoco piso nada",
+         float(app.get_dispositivo("lavadero03")["credito_ficha"]) == 4000)
+
+r = _post(0)
+chequear("rechaza credito 0", "\u274c".encode() in r.data)
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
