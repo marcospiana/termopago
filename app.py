@@ -592,6 +592,31 @@ def limpiar_orden_caja(disp):
     except Exception as e:
         print(f"Limpieza caja {disp.get('id')}: {e}")
 
+def titulo_orden(disp):
+    """Concepto del pago que ve el cliente en su app al escanear el QR.
+
+    En las expendedoras de fichas le sumamos el nombre del comercio
+    ("Ficha x 1 Estacion Villaguay"): un "Ficha x 1" pelado no le dice a nadie
+    DE QUIEN es el cobro, y eso genera dudas justo antes de pagar. Sale del
+    nombre del CLIENTE, no del de la maquina, asi cada local nuevo lo hereda
+    solo sin tocar codigo.
+
+    Esta aparte de rearmar_qr a proposito: es logica pura, sin red, y asi se
+    puede probar sin mockear MercadoPago."""
+    if disp["id"] in ESTACIONES_FICHAS:
+        titulo = f"Ficha x {int(disp['segundos'])}"
+        try:
+            cli = get_cliente(disp.get("cliente")) if disp.get("cliente") else None
+            local = ((cli.get("nombre") or "").strip() if cli else "")
+        except Exception:
+            local = ""
+        if local:
+            titulo = f"{titulo} {local}"[:120]   # MP corta los titulos largos
+        return titulo
+    minutos = disp["segundos"] // 60
+    return f"{disp['nombre']} {minutos} minutos" if minutos >= 1 else disp["nombre"]
+
+
 def rearmar_qr(disp):
     """Carga la orden al QR de la caja del dispositivo, con su precio.
     Antes verifica si la orden anterior fue pagada sin que llegara el
@@ -616,12 +641,7 @@ def rearmar_qr(disp):
     headers = mp_headers(token_de(disp))
     headers["X-Idempotency-Key"] = str(uuid.uuid4())
     monto = f"{float(disp['precio']):.2f}"
-    if disp["id"] in ESTACIONES_FICHAS:
-        # Fichas: el concepto del pago que ve el cliente al escanear (ej "Ficha x 1")
-        titulo = f"Ficha x {int(disp['segundos'])}"
-    else:
-        minutos = disp["segundos"] // 60
-        titulo = f"{disp['nombre']} {minutos} minutos" if minutos >= 1 else disp["nombre"]
+    titulo = titulo_orden(disp)
     orden = {
         "type": "qr",
         "external_reference": disp["id"],

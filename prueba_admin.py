@@ -508,5 +508,45 @@ r6 = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": "0000"})
 chequear("PIN incorrecto no regala", _regalos() == antes2, _regalos() - antes2)
 chequear("y tambien redirige", r6.status_code in (302, 303), r6.status_code)
 
+print("\n== 14. El titulo del QR lleva el nombre del comercio ==")
+# Lo que ve el cliente en su app al escanear. Un "Ficha x 1" pelado no dice de
+# quien es el cobro; con el nombre del local se entiende y evita dudas.
+# Se prueba titulo_orden() directo: es logica pura, sin red (rearmar_qr esta
+# stubbeada arriba para no tocar MP).
+
+t = app.titulo_orden(app.get_dispositivo("lavadero03"))
+chequear("arranca con 'Ficha x'", t.startswith("Ficha x"), t)
+chequear("y lleva el nombre del cliente", "Lavadero" in t, t)
+
+_n = app.get_cliente("lavadero")["nombre"]
+
+app.guardar_cliente("lavadero", {"nombre": ""})
+chequear("sin nombre de cliente queda 'Ficha x N' solo",
+         app.titulo_orden(app.get_dispositivo("lavadero03")) == "Ficha x 1",
+         app.titulo_orden(app.get_dispositivo("lavadero03")))
+
+app.guardar_cliente("lavadero", {"nombre": "   "})
+chequear("un nombre en blanco tampoco ensucia el titulo",
+         app.titulo_orden(app.get_dispositivo("lavadero03")) == "Ficha x 1",
+         app.titulo_orden(app.get_dispositivo("lavadero03")))
+
+app.guardar_cliente("lavadero", {"nombre": "N" * 300})
+chequear("un nombre larguisimo se recorta a 120",
+         len(app.titulo_orden(app.get_dispositivo("lavadero03"))) == 120)
+
+app.guardar_cliente("lavadero", {"nombre": _n})
+
+# Varias fichas por pago: el numero acompaña.
+app.actualizar_dispositivo("lavadero03", {"segundos": 3})
+chequear("con 3 fichas dice 'Ficha x 3'",
+         app.titulo_orden(app.get_dispositivo("lavadero03")).startswith("Ficha x 3"),
+         app.titulo_orden(app.get_dispositivo("lavadero03")))
+app.actualizar_dispositivo("lavadero03", {"segundos": 1})
+
+# Las que no son de fichas no se tocan.
+t2 = app.titulo_orden(app.get_dispositivo("lavadero01"))
+chequear("las de tiempo siguen diciendo los minutos", "minutos" in t2, t2)
+chequear("y NO llevan el nombre del cliente pegado", not t2.endswith("Lavadero"), t2)
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
