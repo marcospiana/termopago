@@ -10,9 +10,16 @@
     que ID cargarle a cada equipo.
     Para cambiarlo: manten apretado BOOT durante los primeros 5 s del arranque
     -> borra WiFi + ID y vuelve a levantar el portal.
-    El rele da UN pulso momentaneo (300 ms) que cierra la senal de 12 VDC contra
-    GND, emulando el boton de arranque. Despues del pulso, la maquina corre su
-    ciclo interno sola: si se cae el WiFi, NO se corta nada.
+    ENTREGA (ver dispensador.h): DOS reles contra la placa Electrolacer.
+      - Rele COIN  (GPIO 26): pulso de 100 ms a masa en la entrada COIN del
+        conector de 3 pines. Con ENTRADA COIN = $0 en la placa, UN pulso acredita
+        el valor de UNA ficha.
+      - Rele BOTON (GPIO 25): en paralelo con el pulsador fisico. La placa
+        acumula credito pero NO entrega sola: hay que apretar el boton.
+      - Sensor     (GPIO 27): opto PC817 desde la linea SENSOR; cuenta cada ficha
+        que cae y confirma la entrega antes de dar el pago por cumplido.
+    Se entrega de a UNA ficha por vez (pulso COIN -> boton -> esperar sensor), sin
+    bloquear el loop: MQTT y watchdog siguen corriendo durante toda la entrega.
 
     Hereda todas las mejoras de confiabilidad de las estaciones 01/02:
       - Watchdog esp_task_wdt con trigger_panic = true (reinicia de verdad).
@@ -81,20 +88,41 @@ String TOPIC_STATUS= "";   // termopago/<caja>/status  equipo  -> backend (+ LWT
 #define PRECIO_ARS        0        // TODO: precio de la ficha (solo informativo en display/log)
 #define CICLO_SEGUNDOS    90       // TODO: duracion del ciclo interno de la maquina (SOLO estetico en el display)
 
-// ---- Pulso de rele ----
-#define RELE_PIN          26       // GPIO al modulo rele (evitar pines strapping)
-#define PULSO_MS          100      // ancho del pulso de moneda al COIN (AJUSTAR con medicion real del monedero)
-#define PAUSA_MS          250      // pausa entre pulsos (>= 100 ms)
-#define MOSTRAR_ENTREGA_MS 3500  // "Entregando" visible este tiempo antes del "Gracias"
-#define MAX_FICHAS        20       // tope de fichas por pago (anti-vaciado)
+// ---- Dispensador: 2 reles (COIN + BOTON) + sensor de fichas ----
+// Estos #define PISAN los valores por defecto de dispensador.h y tienen que ir
+// ANTES del #include. El modulo reemplaza al rele unico que habia antes.
+//
+//   COIN   -> rele: COM al pin GND del conector de 3 pines, NO al pin COIN.
+//             (el del medio es COIN; el de afuera, 12V. Verificado con tester:
+//              9 V en reposo contra GND => pulso a masa, activo bajo)
+//   BOTON  -> rele EN PARALELO con el pulsador fisico que ya esta, sobre el
+//             conector BOTON / LLAVE / GND / SENSOR. Contacto seco: hace lo
+//             mismo que la persona al apretar, sin importar la polaridad.
+//   SENSOR -> opto PC817 desde la linea SENSOR de la placa.
+#define DISP_PIN_COIN     26       // rele que pulsa la entrada COIN
+#define DISP_PIN_BOTON    25       // rele en paralelo con el pulsador
+#define DISP_PIN_SENSOR   27       // opto PC817 desde la linea SENSOR
 
-// ---- Sensor de fichas (realimentacion, opcional; ver placa Electrolacer) ----
-// Cuando se cablee: espiar la linea SENSOR con un opto PC817 -> SENSOR_PIN.
-// Con USAR_SENSOR=1 se podra verificar la entrega y reportar falla al backend.
-#define USAR_SENSOR       0        // 0 = entrega a ciegas. 1 = con sensor (cuando se cablee)
-#define SENSOR_PIN        27
-#define SENSOR_ACTIVO_BAJO 1
-#define RELE_ACTIVO_BAJO  1        // 1 = modulo rele activo en BAJO (los tipicos azules). 0 = activo en ALTO.
+#define DISP_COIN_ACTIVO_BAJO    1 // modulos rele tipicos (los azules): activos en BAJO
+#define DISP_BOTON_ACTIVO_BAJO   1
+#define DISP_SENSOR_ACTIVO_BAJO  1
+
+// 1 = hay que apretar el boton para que entregue (lo verificado en banco).
+// 0 = con el credito cargado la placa entrega sola -> sobra el rele de BOTON.
+// PENDIENTE DE ENSAYO: la prueba del boton se hizo con ENTRADA COIN = $100,
+// juntando de a $100 hasta los $3000. Con ENTRADA COIN = $0 un solo pulso ya
+// vale la ficha entera y puede que entregue sola. Para saberlo: poner ENTRADA
+// COIN = $0, puentear COIN a GND UNA vez y NO tocar el boton.
+//   cae la ficha sola          -> bajar esto a 0 (y te ahorras un rele)
+//   queda el credito en pantalla -> dejarlo en 1
+#define DISP_USAR_BOTON   1
+
+// 1 = verifica cada ficha con el sensor. Con el boton de por medio NO es
+// opcional: sin esto el ESP pulsa a ciegas contra una maquina que acumula
+// credito. Dejar en 0 solo mientras el PC817 todavia no este cableado.
+#define DISP_USAR_SENSOR  1
+
+#define DISP_MAX_FICHAS   20       // tope de fichas por pago (anti-vaciado)
 
 // ---- Boton BOOT (reset de credenciales) ----
 #define BOOT_PIN          0        // GPIO0 = boton BOOT del devkit
@@ -118,12 +146,16 @@ const uint32_t REINICIO_PREVENT   = 21600000UL;  // 6 h en reposo -> reinicio pr
 const uint32_t LCD_REINIT_MS      = 300000UL;    // reinit LCD cada 5 min
 const uint32_t WDT_TIMEOUT_S      = 15;          // watchdog
 
+// El include va DESPUES de los #define de arriba, que son los que lo configuran.
+#include "dispensador.h"
+
 // ============================================================================
 //  ESTADO GLOBAL
 // ============================================================================
 WiFiClientSecure  espClient;
 PubSubClient      mqtt(espClient);
 Preferences       prefs;
+Dispensador       dispensador;
 
 // ---- Identidad: leer/guardar el ID de caja en la NVS ----
 void aplicarIdentidad(const String& id) {
@@ -160,7 +192,8 @@ uint32_t ultimoIntentoMqtt = 0;
 uint32_t ultimoLcdReinit= 0;
 uint32_t pulsosTotales  = 0;
 
-String   ultimoPagoProcesado = "";   // dedup (se persiste en NVS): ultimo pago que ARRANCO
+String   ultimoPagoProcesado = "";   // dedup (se persiste en NVS): ultimo pago ENTREGADO
+String   pagoEnCurso         = "";   // pago que el dispensador esta entregando ahora
 
 // Cola de pagos: si entra un pago mientras hay un servicio en curso, espera su
 // turno y se activa al terminar (asi no se pierden servicios).
@@ -454,7 +487,7 @@ void asegurarWiFi() {
 //  MQTT
 // ============================================================================
 String heartbeatJson(const char* estado) {
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<384> doc;
   doc["caja"]        = CAJA_ID;
   doc["estado"]      = estado;              // "online" / "offline"
   doc["uptime_s"]    = (millis() - bootMs) / 1000;
@@ -462,6 +495,11 @@ String heartbeatJson(const char* estado) {
   doc["heap"]        = ESP.getFreeHeap();
   doc["pulsos"]      = pulsosTotales;
   doc["ultimo_pago"] = ultimoPagoProcesado;
+  // Dispensador: lo que el backend necesita para detectar una maquina que cobra
+  // y no entrega. credito_varado > 0 = hay plata cargada sin ficha entregada.
+  doc["dispensador"]    = dispensador.estadoTxt();
+  doc["credito_varado"] = dispensador.creditoVarado();
+  doc["fichas_sensor"]  = dispensador.fichasVistas();
   String out; serializeJson(doc, out);
   return out;
 }
@@ -538,58 +576,56 @@ void asegurarMqtt() {
 }
 
 // ============================================================================
-//  PULSO DE RELE
+//  ENTREGA DE FICHAS  (via dispensador.h: rele COIN + rele BOTON + sensor)
 // ============================================================================
-inline void releEscribir(bool activo) {
-#if RELE_ACTIVO_BAJO
-  digitalWrite(RELE_PIN, activo ? LOW : HIGH);
-#else
-  digitalWrite(RELE_PIN, activo ? HIGH : LOW);
-#endif
-}
+// Ya no hay tren de pulsos bloqueante. El modulo hace, por cada ficha:
+//     pulso COIN -> pausa -> espera que acredite -> pulso BOTON -> espera sensor
+// sin bloquear el loop (asi el MQTT y el watchdog siguen corriendo durante toda
+// la entrega). De a UNA ficha por vez a proposito: si falla en la ficha 3 de 5
+// queda varado el credito de una sola, no el de cinco.
 
+// Arranca la entrega. No bloquea: termina en entregaTerminada().
 void entregarFichas(const String& pagoId, int cantidad) {
-  // DEDUP: si ya procesamos este pago, no repetimos (evita doble entrega)
+  // DEDUP: si ya entregamos este pago, no repetimos (evita doble entrega)
   if (pagoId == ultimoPagoProcesado) {
     Serial.printf("[FICHAS] pago %s ya procesado, ignoro\n", pagoId.c_str());
     return;
   }
-  if (cantidad < 1)          cantidad = 1;
-  if (cantidad > MAX_FICHAS) cantidad = MAX_FICHAS;
-
-  Serial.printf("[FICHAS] entregando %d ficha(s) por pago %s\n", cantidad, pagoId.c_str());
-  uint32_t tEntrega = millis();
-  mostrar("Entregando", String(cantidad) + " ficha(s)");
-
-  // Tren de N pulsos al COIN: cada pulso = 1 ficha (la placa Electrolacer
-  // acredita y dispara el hopper). Bloquea, pero alimenta el watchdog; con el
-  // tope MAX_FICHAS el peor caso queda holgado bajo el keepalive de MQTT.
-  for (int i = 0; i < cantidad; i++) {
-    releEscribir(true);
-    uint32_t t0 = millis();
-    while (millis() - t0 < PULSO_MS) { watchdogFeed(); delay(5); }
-    releEscribir(false);
-    pulsosTotales++;
-    uint32_t t1 = millis();
-    while (millis() - t1 < PAUSA_MS) { watchdogFeed(); delay(5); }
+  if (!dispensador.pedir(cantidad)) {
+    // Ocupado: el pago sigue en la cola y el loop lo reintenta al quedar libre.
+    Serial.println("[FICHAS] dispensador ocupado, queda en cola");
+    return;
   }
+  pagoEnCurso = pagoId;
+  Serial.printf("[FICHAS] entregando %d ficha(s) por pago %s\n", cantidad, pagoId.c_str());
+}
 
-  // Marca el pago como procesado SOLO despues de enviar los pulsos.
-  ultimoPagoProcesado = pagoId;
-  prefs.putString("ultpago", ultimoPagoProcesado);   // dedup persistente en NVS
+// Callback del modulo: aca se cierra el pago. Se llama una sola vez por lote,
+// con o sin error.
+void entregaTerminada(int pedidas, int entregadas, DispError err) {
+  // El dedup se marca recien aca: si el equipo se corta en el medio, el pago
+  // NO queda como servido y se puede reintentar.
+  ultimoPagoProcesado = pagoEnCurso;
+  prefs.putString("ultpago", ultimoPagoProcesado);
+
+  pulsosTotales += entregadas;
   prefs.putUInt("pulsos", pulsosTotales);
 
-  // TODO (cuando se cablee el sensor, USAR_SENSOR=1): verificar que cayeron
-  // 'cantidad' fichas y, si falta, POST a /entrega_fallida/<caja>/<pago> para
-  // que el backend reembolse la diferencia.
+  graciasHastaMs = millis() + GRACIAS_MS;   // el modulo ya puso el texto en el LCD
+  publicarEstado("online", false);          // el heartbeat lleva el detalle de la falla
 
-  // mantener "Entregando" visible unos segundos antes del "Gracias"
-  while (millis() - tEntrega < MOSTRAR_ENTREGA_MS) { watchdogFeed(); delay(10); }
-
-  publicarEstado("online", false);
-  mostrar("Listo!", "Gracias");
-  graciasHastaMs = millis() + GRACIAS_MS;   // 5 s de "gracias" y vuelve a reposo
-  Serial.println("[FICHAS] entrega completa.");
+  if (err == DISP_OK) {
+    Serial.printf("[FICHAS] entrega completa: %d ficha(s).\n", entregadas);
+  } else {
+    // Hopper vacio o atascado. Si quedo credito cargado, alguien puede llevarse
+    // una ficha gratis apretando el boton fisico: va al backend por el heartbeat.
+    Serial.printf("[FICHAS] FALLA: pedidas %d, entregadas %d (%s). Credito varado: %u\n",
+                  pedidas, entregadas, Dispensador::errorTxt(err),
+                  (unsigned)dispensador.creditoVarado());
+    // TODO backend: POST /entrega_fallida/<caja>/<pago> con pedidas vs entregadas
+    // para que reembolse la diferencia.
+  }
+  pagoEnCurso = "";
 }
 
 // conteo estetico del ciclo (el ESP NO controla la maquina, solo lo muestra)
@@ -633,8 +669,11 @@ void setup() {
   delay(200);
   bootMs = millis();
 
-  pinMode(RELE_PIN, OUTPUT);
-  releEscribir(false);            // arranca en reposo (rele abierto)
+  // Dispensador: deja los dos reles abiertos ANTES de ponerlos como salida,
+  // para no tirar un pulso espurio (= una ficha regalada) en el arranque.
+  dispensador.begin();
+  dispensador.alMostrar([](const char* a, const char* b){ mostrar(a, b); });
+  dispensador.alTerminar(entregaTerminada);
 
   watchdogInit();
 
@@ -687,8 +726,11 @@ void loop() {
   asegurarMqtt();
   mqtt.loop();
 
+  // ---- maquina de estados de la entrega (no bloquea) ----
+  dispensador.actualizar();
+
   // ---- activar el proximo pago de la cola cuando el equipo esta libre ----
-  if (!mostrandoCiclo && graciasHastaMs == 0 && colaLen > 0) {
+  if (!dispensador.ocupado() && !mostrandoCiclo && graciasHastaMs == 0 && colaLen > 0) {
     String p          = colaPagos[0];
     cantidadPendiente = colaCantidad[0];
     for (int i = 1; i < colaLen; i++) {   // desplazar la cola (FIFO)
@@ -705,7 +747,9 @@ void loop() {
     publicarEstado("online", false);
     // reasegurar la pantalla de reposo si estamos ociosos (recupera la pantalla
     // tras mensajes transitorios como "reconectando")
-    if (!mostrandoCiclo && graciasHastaMs == 0 && mqtt.connected()) pantallaEspera();
+    // ojo: NO pisar el "Entregando..." mientras el dispensador trabaja
+    if (!dispensador.ocupado() && !mostrandoCiclo && graciasHastaMs == 0 && mqtt.connected())
+      pantallaEspera();
   }
 
   // ---- conteo estetico del ciclo ----
@@ -718,9 +762,9 @@ void loop() {
   }
 
   // ---- reinicio por "sin comunicacion" (MQTT caido > 90 s) ----
-  // NO reinicia durante un servicio: espera a que termine el conteo (el pulso ya
-  // salio y la maquina corre sola; reiniciar solo perderia el display y la cola).
-  if (!mostrandoCiclo && (millis() - ultimoMqttOk > SIN_COMM_TIMEOUT)) {
+  // NO reinicia durante una entrega: reiniciar con el credito ya cargado y la
+  // ficha sin salir es justo como queda credito varado en la maquina.
+  if (!dispensador.ocupado() && !mostrandoCiclo && (millis() - ultimoMqttOk > SIN_COMM_TIMEOUT)) {
     Serial.println("[SIN COMM] broker inalcanzable > 90 s -> reinicio");
     mostrar("Sin broker", "reiniciando");
     delay(500);
@@ -728,7 +772,7 @@ void loop() {
   }
 
   // ---- reinicio preventivo cada 6 h en reposo ----
-  if (!mostrandoCiclo && (millis() - bootMs > REINICIO_PREVENT)) {
+  if (!dispensador.ocupado() && !mostrandoCiclo && (millis() - bootMs > REINICIO_PREVENT)) {
     Serial.println("[PREVENTIVO] 6 h en reposo -> reinicio limpio");
     delay(200);
     ESP.restart();
@@ -746,7 +790,7 @@ void loop() {
   // El umbral blando (20k) espera a que termine el servicio; solo un OOM critico
   // (<10k) reinicia igual en pleno conteo para no colgarse.
   uint32_t heapLibre = ESP.getFreeHeap();
-  if ((heapLibre < 20000 && !mostrandoCiclo) || heapLibre < 10000) {
+  if ((heapLibre < 20000 && !dispensador.ocupado() && !mostrandoCiclo) || heapLibre < 10000) {
     Serial.printf("[HEAP] bajo: %u -> reinicio preventivo\n", heapLibre);
     delay(200);
     ESP.restart();
