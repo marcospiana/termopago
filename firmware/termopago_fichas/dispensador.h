@@ -119,6 +119,17 @@
 #define DISP_PULSOS_POR_FICHA     1
 #endif
 
+// Tiempo que la placa necesita DESPUES de la pulsacion del boton antes de
+// aceptar pulsos de monedero otra vez. Medido en banco: con menos de ~7 s los
+// pulsos de la ficha siguiente SE PIERDEN (la placa esta ocupada entregando y
+// no los cuenta), el credito no llega al precio y la ficha no sale.
+// Se mide desde el boton a proposito, no desde que cae la ficha: asi vale igual
+// con el sensor cableado o sin cablear. Si se midiera desde la espera a ciegas,
+// al activar el sensor esa espera desaparece y el problema volveria.
+#ifndef DISP_RECUPERACION_MS
+#define DISP_RECUPERACION_MS   7000
+#endif
+
 #ifndef DISP_PULSO_COIN_MS
 #define DISP_PULSO_COIN_MS      100      // nominal del RM5; la placa tolera 10 ms - 2 s
 #endif
@@ -158,6 +169,7 @@ enum DispEstado {
   DISP_BOTON,        // rele BOTON cerrado
   DISP_SENSOR,       // esperando que caiga la ficha
   DISP_ENTRE,        // respiro antes de la proxima ficha
+  DISP_RECUP,        // esperando que la placa se recupere del boton anterior
   DISP_FIN           // termino (con o sin error); vuelve a REPOSO al leerlo
 };
 
@@ -281,6 +293,7 @@ class Dispensador {
         if (ahora - _t0 >= DISP_PULSO_BOTON_MS) {
           _releBoton(false);
           _pulsosBoton++;
+          _tUltimoBoton = ahora;        // desde aca cuenta la recuperacion
           _ir(DISP_SENSOR);
         }
         break;
@@ -313,6 +326,12 @@ class Dispensador {
         if (ahora - _t0 >= DISP_ENTRE_FICHAS_MS) _arrancarCiclo();
         break;
 
+      case DISP_RECUP:
+        // La placa sigue ocupada por el boton anterior: si pulsaramos ahora,
+        // los pulsos se perderian en silencio.
+        if (ahora - _tUltimoBoton >= DISP_RECUPERACION_MS) _empezarPulsos();
+        break;
+
       default:
         break;
     }
@@ -343,6 +362,7 @@ class Dispensador {
       case DISP_BOTON:    return "boton";
       case DISP_SENSOR:   return "esperando ficha";
       case DISP_ENTRE:    return "entre fichas";
+      case DISP_RECUP:    return "esperando la placa";
       default:            return "fin";
     }
   }
@@ -360,6 +380,7 @@ class Dispensador {
   uint32_t   _fichasAlPulsar = 0;
   int        _pulsosRestantes = 0;   // pulsos de COIN que faltan para esta ficha
   int        _pulsosPorFicha  = DISP_PULSOS_POR_FICHA;   // lo pisa el backend
+  uint32_t   _tUltimoBoton    = 0;   // 0 = todavia no se pulso ninguno
   bool       _creditoCargado = false;
   uint32_t   _creditoVarado  = 0;
   uint32_t   _pulsosCoin     = 0;
@@ -378,9 +399,22 @@ class Dispensador {
 
   void _arrancarCiclo() {
     _creditoCargado = false;
+    // Si la placa todavia esta ocupada por la pulsacion anterior, esperamos.
+    // Vale tanto entre fichas de un mismo lote como para un pago nuevo que
+    // llegue pegado al anterior.
+    if (_tUltimoBoton && (millis() - _tUltimoBoton < DISP_RECUPERACION_MS)) {
+      _ir(DISP_RECUP);
+      return;
+    }
+    _empezarPulsos();
+  }
+
+  void _empezarPulsos() {
     // Marca de referencia ANTES del pulso: cualquier ficha que caiga a partir
     // de aca cuenta como la de este ciclo. Tomarla mas tarde se perderia la
     // ficha en el modo sin boton, donde la placa puede entregar apenas acredita.
+    // Va aca y no en _arrancarCiclo() para que una ficha que caiga tarde,
+    // durante la recuperacion, se impute al ciclo anterior y no a este.
     _fichasAlPulsar = _leerSensor();
     _pulsosRestantes = _pulsosPorFicha;
     _releCoin(true);
