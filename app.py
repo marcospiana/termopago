@@ -9,6 +9,8 @@ import requests
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+from html import escape as _escape
 
 # Hora de Argentina (UTC-3), como datetime "naive" para guardar/comparar
 # fechas de forma consistente en todo el sistema.
@@ -1032,6 +1034,30 @@ def panel_link(clave, alias):
     })
 
 
+# Freno anti doble-envio del regalo. El motivo principal por el que se
+# regalaban fichas de mas era el refresh reenviando el POST (resuelto con el
+# redirect de mas abajo), pero un doble clic o un reintento del navegador por
+# red lenta hacen lo mismo. Esto lo corta del lado del servidor, que es el
+# unico lugar donde el freno es confiable.
+GIFT_COOLDOWN_S = 20
+
+def segundos_desde_ultimo_regalo(disp_id):
+    """Segundos desde el ultimo regalo de esa maquina. None si nunca hubo."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT fecha FROM ordenes WHERE dispositivo_id=%s AND id LIKE 'gift_%%' "
+                "ORDER BY fecha DESC LIMIT 1", (disp_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or not row["fecha"]:
+        return None
+    try:
+        return (ahora_ar() - datetime.fromisoformat(row["fecha"])).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
 def regalar_ficha(cli, mis, pin_ingresado):
     """El cliente regala 1 ficha desde su panel, validando su PIN. Se registra
     como orden 'gift_' -> NO cuenta como venta, pero queda el rastro."""
@@ -1088,6 +1114,12 @@ def regalar_ficha(cli, mis, pin_ingresado):
             seg = None
         if seg is None or seg > 600:
             return f"La maquina '{d['nombre']}' esta desconectada. Proba cuando vuelva a estar en linea."
+        # Anti doble-envio: si ya se regalo hace muy poco, no repetimos.
+        desde = segundos_desde_ultimo_regalo(d["id"])
+        if desde is not None and desde < GIFT_COOLDOWN_S:
+            faltan = int(GIFT_COOLDOWN_S - desde) + 1
+            return (f"Ya se regalo una ficha de '{d['nombre']}' hace unos segundos. "
+                    f"Si querés regalar otra, espera {faltan}s.")
         oid = "gift_" + uuid.uuid4().hex[:16]
         if publicar_activacion(d["id"], oid, segundos_override=1):
             insertar_orden(oid, d["id"], 1, 0)
@@ -1114,6 +1146,15 @@ def panel_cliente(token):
     mensaje = ""
     if request.method == "POST" and request.form.get("accion") == "regalar":
         mensaje = regalar_ficha(cli, mis, request.form.get("pin", ""))
+        # Redirect-After-POST (PRG). SIN esto, la pagina se dibujaba como
+        # respuesta AL POST: el navegador quedaba parado sobre el POST y cada
+        # F5 reenviaba el formulario con el PIN -> otra ficha regalada, sin que
+        # el cliente se diera cuenta. Con el redirect, el refresh repite un GET
+        # inofensivo. El mensaje viaja por query string.
+        return redirect(f"/panel/{token}?m={quote(mensaje)}")
+    # El mensaje puede venir del redirect de arriba: es texto que llega por URL,
+    # asi que se escapa antes de meterlo en el HTML.
+    mensaje = _escape(request.args.get("m", "")[:300])
 
     ahora = ahora_ar()
 
@@ -1206,7 +1247,7 @@ def panel_cliente(token):
             '<input type="hidden" name="accion" value="regalar">'
             '<label>Tu PIN</label>'
             '<input type="text" inputmode="numeric" name="pin" placeholder="PIN" autocomplete="off">'
-            '<button type="submit">Regalar 1 ficha</button>'
+            '<button type="submit" onclick="this.disabled=true;this.form.submit();">Regalar 1 ficha</button>'
             '</form>'
             f'<p class="sub">Regalaste {regaladas_mes} ficha(s) este mes.</p>'
         )

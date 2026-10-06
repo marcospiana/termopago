@@ -328,23 +328,29 @@ cli = app.get_cliente("lavadero")
 pin_ok, tok = cli["pin"], cli["panel_token"]
 pin_malo = "0000" if pin_ok != "0000" else "1111"
 
+# El POST de regalo redirige (PRG, para que el refresh no reenvie el form), asi
+# que para leer el mensaje hay que seguir el redirect hasta el GET.
+def _regalo(pin):
+    return c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin},
+                  follow_redirects=True)
+
 for i in range(1, app.PIN_MAX_INTENTOS):
-    r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_malo})
+    r = _regalo(pin_malo)
     chequear(f"intento fallido {i} avisa cuantos quedan",
              f"Te queda(n) {app.PIN_MAX_INTENTOS - i}".encode() in r.data, r.data[-400:])
 
-r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_malo})
+r = _regalo(pin_malo)
 chequear("al llegar al tope se bloquea", "se bloqueo el regalo".encode() in r.data, r.data[-400:])
 chequear("quedo grabado el bloqueo en la DB",
          bool(app.get_cliente("lavadero")["pin_bloqueado_hasta"]))
 
-r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+r = _regalo(pin_ok)
 chequear("bloqueado, ni el PIN correcto pasa", "Proba de nuevo en".encode() in r.data, r.data[-400:])
 
 # El bloqueo se vence solo: lo corremos al pasado en vez de esperar 15 min.
 app.guardar_cliente("lavadero", {
     "pin_bloqueado_hasta": (app.ahora_ar() - app.timedelta(minutes=1)).isoformat()})
-r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+r = _regalo(pin_ok)
 chequear("vencido el bloqueo, el PIN correcto vuelve a andar",
          "Proba de nuevo en".encode() not in r.data and b"PIN incorrecto" not in r.data,
          r.data[-400:])
@@ -454,6 +460,53 @@ chequear("y tampoco piso nada",
 
 r = _post(0)
 chequear("rechaza credito 0", "\u274c".encode() in r.data)
+
+print("\n== 13. El panel NO regala fichas de mas al refrescar ==")
+# BUG REAL: la pagina se dibujaba como respuesta AL POST. El navegador quedaba
+# parado sobre el POST y cada F5 reenviaba el formulario con el PIN -> otra
+# ficha. Ahora el POST redirige (PRG) y el refresh es un GET inofensivo.
+cli = app.get_cliente("lavadero")
+tok = cli["panel_token"]
+pin_ok = cli["pin"]
+app.guardar_cliente("lavadero", {"pin_fallidos": 0, "pin_bloqueado_hasta": None})
+app.actualizar_dispositivo("lavadero03", {"ultimo_poll": app.ahora_ar().isoformat()})
+
+def _regalos():
+    conn = app.get_db(); cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS n FROM ordenes WHERE id LIKE 'gift_%%'")
+    n = cur.fetchone()["n"]; cur.close(); conn.close()
+    return n
+
+antes = _regalos()
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+chequear("el POST de regalo redirige (no devuelve HTML)", r.status_code in (302, 303), r.status_code)
+chequear("regalo 1 ficha", _regalos() == antes + 1, _regalos() - antes)
+
+# El refresh del navegador tras el redirect es un GET a la misma URL.
+destino = r.headers["Location"]
+r2 = c.get(destino)
+chequear("el GET del redirect muestra el mensaje", r2.status_code == 200, r2.status_code)
+chequear("refrescar NO regala otra ficha", _regalos() == antes + 1, _regalos() - antes)
+r3 = c.get(destino)
+chequear("refrescar de nuevo tampoco", _regalos() == antes + 1, _regalos() - antes)
+
+# Y si alguien reenvia el POST a mano (doble clic, reintento del navegador),
+# el cooldown del servidor lo frena.
+r4 = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_ok})
+chequear("un segundo POST inmediato NO regala (cooldown)",
+         _regalos() == antes + 1, _regalos() - antes)
+chequear("y avisa por que", "unos segundos" in c.get(r4.headers["Location"]).get_data(as_text=True))
+
+# El mensaje viaja por la URL: no puede inyectar HTML en la pagina.
+r5 = c.get(f"/panel/{tok}?m=<script>alert(1)</script>")
+chequear("el mensaje de la URL se escapa (sin XSS)",
+         b"<script>alert(1)</script>" not in r5.data and b"&lt;script&gt;" in r5.data)
+
+# Un PIN incorrecto tampoco puede regalar por reenvio.
+antes2 = _regalos()
+r6 = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": "0000"})
+chequear("PIN incorrecto no regala", _regalos() == antes2, _regalos() - antes2)
+chequear("y tambien redirige", r6.status_code in (302, 303), r6.status_code)
 
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
