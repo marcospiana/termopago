@@ -153,6 +153,13 @@ String TOPIC_STATUS= "";   // termopago/<caja>/status  equipo  -> backend (+ LWT
 //
 // Para bajar mas hay que cambiar el rele por un PC817 en la linea COIN: el
 // rele no da para 50/50 ms y ademas es la fuente del riesgo de rebote.
+// Espera entre el ultimo pulso de monedero y la pulsacion del boton. Tiene dos
+// funciones: darle tiempo a la placa a terminar de acreditar, y dejar el
+// credito completo visible en el display un instante (util para verificar de un
+// vistazo que entraron los 30 pulsos). Si fuera corta, el sintoma seria: el
+// display llega al precio, el rele hace clic, y la ficha no sale.
+#define DISP_ESPERA_ACREDITA_MS 1000
+
 #define DISP_PULSO_COIN_MS      40
 #define DISP_PAUSA_COIN_MS      60
 
