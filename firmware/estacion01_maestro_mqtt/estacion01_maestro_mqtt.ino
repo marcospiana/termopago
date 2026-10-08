@@ -34,6 +34,7 @@
 #include "secretos_privado.h"   // MQTT_HOST/PORT/USER/PASS, BACKEND_HOST
 #include <time.h>              // configTime/time() para validar el cert TLS
 #include "ca_hivemq.h"        // raices CA de Lets Encrypt (ISRG X1/X2)
+#include <Preferences.h>      // guardar la radio WiFi aprendida (BSSID/canal)
 
 // ── Canales de esta estacion ──────────────────────────────────────
 const int   NUM_CANALES = 2;
@@ -52,6 +53,9 @@ String TOPIC_STATUS(int i) { return String("termopago/") + IDS[i] + "/status"; }
 #define LOCK_ON 0
 uint8_t LOCK_BSSID[6] = {0x00,0x00,0x00,0x00,0x00,0x00};
 int32_t LOCK_CHANNEL  = 1;
+
+// Clave del AP del portal de configuracion (minimo 8 caracteres). Cambiala si querés.
+#define PORTAL_PASS "termopago"
 
 // ── Tiempos ───────────────────────────────────────────────────────
 const int      WDT_TIMEOUT_S    = 30;
@@ -213,7 +217,7 @@ String heartbeatJson(const char* caja, const char* estado) {
 void publicarEstado(const char* estado) {
   if (!mqtt.connected()) return;
   for (int i = 0; i < NUM_CANALES; i++)
-    mqtt.publish(TOPIC_STATUS(i).c_str(), heartbeatJson(IDS[i], estado).c_str(), true);
+    mqtt.publish(TOPIC_STATUS(i).c_str(), heartbeatJson(IDS[i], estado).c_str(), false);
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
@@ -242,7 +246,7 @@ bool mqttConectar() {
   // vencimiento del QR (15 min) si el equipo se cae de golpe.
   String willMsg = heartbeatJson(IDS[0], "offline");
   bool ok = mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS,
-                         TOPIC_STATUS(0).c_str(), 1, true, willMsg.c_str(), false);
+                         TOPIC_STATUS(0).c_str(), 1, false, willMsg.c_str(), false);
   if (ok) {
     Serial.println("[MQTT] conectado");
     for (int i = 0; i < NUM_CANALES; i++) mqtt.subscribe(TOPIC_CMD(i).c_str(), 1);
@@ -261,28 +265,83 @@ void asegurarMqtt() {
   mqttConectar();
 }
 
-// ─── WiFi ─────────────────────────────────────────────────────────
+// ─── WiFi: portal + auto-lock de la radio (anti band-steering) ────
+// El portal (WiFiManager) toma la red del cliente. La 1ra vez que conecta
+// aprende la radio exacta (BSSID + canal) y la guarda; en los arranques
+// siguientes reconecta CLAVADO a esa radio, para que un router doble banda
+// (2.4/5GHz con la misma SSID) no lo salte de banda y lo cuelgue.
+Preferences wifiPrefs;
+static uint8_t lockedBssid[6];
+static int32_t lockedChannel = 0;
+static bool    haveLock      = false;
+
+void cargarLock() {
+  wifiPrefs.begin("wifiloc", true);
+  size_t n = wifiPrefs.getBytes("bssid", lockedBssid, 6);
+  lockedChannel = wifiPrefs.getInt("chan", 0);
+  wifiPrefs.end();
+  haveLock = (n == 6 && lockedChannel > 0);
+}
+
+void guardarLock() {
+  uint8_t* b  = WiFi.BSSID();
+  int32_t  ch = WiFi.channel();
+  if (b == nullptr || ch <= 0) return;
+  wifiPrefs.begin("wifiloc", false);
+  wifiPrefs.putBytes("bssid", b, 6);
+  wifiPrefs.putInt("chan", ch);
+  wifiPrefs.end();
+  memcpy(lockedBssid, b, 6);
+  lockedChannel = ch;
+  haveLock = true;
+  Serial.printf("[WiFi] radio guardada: canal %d, BSSID %02X:%02X:%02X:%02X:%02X:%02X\n",
+                (int)ch, b[0], b[1], b[2], b[3], b[4], b[5]);
+}
+
+void borrarLock() {
+  wifiPrefs.begin("wifiloc", false);
+  wifiPrefs.clear();
+  wifiPrefs.end();
+  haveLock = false;
+  memset(lockedBssid, 0, 6);
+  lockedChannel = 0;
+}
+
 void conectarWiFi() {
   WiFi.mode(WIFI_STA); WiFi.setSleep(false);
   WiFi.setAutoReconnect(true); WiFi.persistent(true);
   WiFiManager wm;
-  String red = wm.getWiFiSSID();
+  String red  = wm.getWiFiSSID();
+  String pass = wm.getWiFiPass();
   mostrar("Conectando WiFi", "Por favor espere");
+
   if (red.length() > 0) {
+    cargarLock();
     unsigned long t0 = millis();
-#if LOCK_ON
-    WiFi.begin(red.c_str(), wm.getWiFiPass().c_str(), LOCK_CHANNEL, LOCK_BSSID);
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 18000) delay(250);
-    if (WiFi.status() != WL_CONNECTED) { WiFi.begin(); t0 = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(250); }
-#else
-    WiFi.begin();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) delay(250);
-#endif
+    if (haveLock) {
+      // reconecta clavado a la radio aprendida
+      WiFi.begin(red.c_str(), pass.c_str(), lockedChannel, lockedBssid);
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 18000) delay(250);
+      if (WiFi.status() != WL_CONNECTED) {
+        // esa radio no aparecio (router cambiado/reubicado): reintento libre y re-aprendo
+        Serial.println("[WiFi] radio guardada no responde -> reintento libre");
+        WiFi.begin(red.c_str(), pass.c_str());
+        t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(250);
+        if (WiFi.status() == WL_CONNECTED) guardarLock();
+      }
+    } else {
+      // primera conexion con red ya guardada: aprendo la radio
+      WiFi.begin(red.c_str(), pass.c_str());
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) delay(250);
+      if (WiFi.status() == WL_CONNECTED) guardarLock();
+    }
     if (WiFi.status() != WL_CONNECTED) { mostrar("Sin WiFi", "Reintentando..."); delay(1000); ESP.restart(); }
   } else {
+    // sin red guardada -> portal de configuracion (AP con clave)
     wm.setConfigPortalTimeout(180);
-    if (!wm.autoConnect("TermoPago-Est01")) { delay(1000); ESP.restart(); }
+    if (!wm.autoConnect("TermoPago-Est01", PORTAL_PASS)) { delay(1000); ESP.restart(); }
+    guardarLock();   // recien configurado por portal: aprendo la radio
   }
   Serial.println("[WiFi] " + WiFi.localIP().toString());
 }
@@ -295,7 +354,7 @@ void ventanaResetWiFi() {
     if (digitalRead(0) == LOW) {
       unsigned long t1 = millis();
       while (digitalRead(0) == LOW && millis() - t1 < 1000) delay(50);
-      if (millis() - t1 >= 1000) { WiFiManager wm; wm.resetSettings();
+      if (millis() - t1 >= 1000) { WiFiManager wm; wm.resetSettings(); borrarLock();
         mostrar("WiFi borrado", "Configure de nuevo"); delay(1500); ESP.restart(); }
     }
     delay(50);

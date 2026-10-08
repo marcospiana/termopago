@@ -404,11 +404,11 @@ boolean mqttConectar() {
   String willMsg  = heartbeatJson("offline");
   // connect(id, user, pass, willTopic, willQos, willRetain, willMsg, cleanSession=false)
   bool ok = mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS,
-                         TOPIC_STATUS, 1, true, willMsg.c_str(), false);
+                         TOPIC_STATUS, 1, false, willMsg.c_str(), false);
   if (ok) {
     Serial.println("[MQTT] conectado al broker");
     mqtt.subscribe(TOPIC_CMD, 1);          // QoS 1
-    publicarEstado("online", true);        // retenido: el backend ve el ultimo estado
+    publicarEstado("online", false);       // NO retenido: el backend se entera por el heartbeat en vivo
     ultimoMqttOk = millis();
     if (!mostrandoCiclo) pantallaEspera();   // pantalla de reposo para el cliente
   } else {
@@ -462,7 +462,7 @@ void darPulso(const String& pagoId) {
 #endif
 
   // ack por status + arranca el conteo estetico
-  publicarEstado("online", true);
+  publicarEstado("online", false);
   cicloSegundos  = (segundosPendiente > 0) ? segundosPendiente : CICLO_SEGUNDOS;  // del server o default
   mostrandoCiclo = true;
   cicloInicioMs  = millis();
@@ -582,7 +582,7 @@ void loop() {
   // ---- heartbeat cada 60 s ----
   if (millis() - ultimoHeartbeat >= HEARTBEAT_MS) {
     ultimoHeartbeat = millis();
-    publicarEstado("online", true);
+    publicarEstado("online", false);
     // reasegurar la pantalla de reposo si estamos ociosos (recupera la pantalla
     // tras mensajes transitorios como "reconectando")
     if (!mostrandoCiclo && graciasHastaMs == 0 && mqtt.connected()) pantallaEspera();
