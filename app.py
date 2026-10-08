@@ -1414,11 +1414,12 @@ def panel_cliente(token):
 <h3>📡 Estado de conexion</h3>
 {tarjetas_estado}
 
+{bloque_regalo}
+
 <h3>📊 Ventas</h3>
 <div class="cards">{tarjeta("Hoy", tot_hoy)}{tarjeta("Este mes", tot_mes)}{tarjeta("Historico", tot_all)}</div>
 
 {bloque_descarga}
-{bloque_regalo}
 
 <h3>💲 Precio y cantidad</h3>
 {info_maquinas}
