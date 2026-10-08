@@ -1254,13 +1254,18 @@ def panel_cliente(token):
     if mis_ids:
         conn = get_db()
         cur = conn.cursor()
+        # Sin filtro de LIKE a proposito: 'ord\_%' necesita ESCAPE para que
+        # el guion bajo sea literal, y eso Postgres lo da por default pero
+        # SQLite no. Quedaba andando en produccion y matcheando CERO en los
+        # tests, o sea que esta parte no estaba realmente cubierta.
+        # Clasificar por prefijo en Python se comporta igual en los dos.
         cur.execute(
-            r"""SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado, motivo
+            """SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado, motivo
                 FROM ordenes WHERE dispositivo_id IN %s
-                AND (id LIKE 'ord\_%%' OR id LIKE 'pay\_%%' OR id LIKE 'mo\_%%' OR id LIKE 'gift\_%%')
                 ORDER BY fecha DESC""",
             (mis_ids,))
-        rows = cur.fetchall()
+        rows = [r for r in cur.fetchall()
+                if (r["id"] or "").startswith(("ord_", "pay_", "mo_", "gift_"))]
         cur.close()
         conn.close()
         hoy = ahora.strftime("%Y-%m-%d")
@@ -1281,9 +1286,11 @@ def panel_cliente(token):
     por_motivo_mes = {k: 0 for k in MOTIVOS}
     if mis_ids:
         conn = get_db(); cur = conn.cursor()
-        cur.execute(r"""SELECT fecha, motivo FROM ordenes
-                        WHERE dispositivo_id IN %s AND id LIKE 'gift\_%%'""", (mis_ids,))
+        cur.execute("""SELECT id, fecha, motivo FROM ordenes
+                       WHERE dispositivo_id IN %s""", (mis_ids,))
         for rg in cur.fetchall():
+            if not (rg["id"] or "").startswith("gift_"):
+                continue
             if (rg["fecha"] or "")[:7] == ahora.strftime("%Y-%m"):
                 k = rg["motivo"] if rg["motivo"] in MOTIVOS else MOTIVO_DEFECTO
                 por_motivo_mes[k] += 1
