@@ -338,6 +338,11 @@ def init_db():
     # y en algun momento alguien aprieta el boton y se lleva una ficha gratis.
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS credito_ficha REAL")
     cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS valor_pulso REAL")
+    # pulsos_reportados: con cuantos pulsos por ficha dice el ESP que esta
+    # trabajando, tal como lo manda en el heartbeat. NO se configura: es lo que
+    # el equipo informa. Sirve para ver desde /config si tomo el ultimo cambio
+    # sin tener que ir hasta la maquina.
+    cur.execute("ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS pulsos_reportados INTEGER")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
             alias         TEXT PRIMARY KEY,
@@ -2609,8 +2614,27 @@ def config_panel(clave):
             _cred  = float(disp["credito_ficha"] or CREDITO_FICHA_DEFAULT)
             _valor = float(disp["valor_pulso"]   or VALOR_PULSO_DEFAULT)
             _n     = pulsos_por_ficha(disp)
-            _aviso = (f'<p class="ok">= {_n} pulsos por ficha</p>' if _n else
-                      '<p class="mal">La división no da exacta — revisá los valores</p>')
+            # Lo que la caja dice estar usando (del heartbeat). Si no coincide con
+            # lo guardado, el cambio todavia no llego: sin esto habria que ir hasta
+            # la maquina para saberlo.
+            try:
+                _rep = disp.get("pulsos_reportados")
+                _rep = int(_rep) if _rep not in (None, "") else None
+            except (TypeError, ValueError, AttributeError):
+                _rep = None
+            if not _n:
+                _aviso = '<p class="mal">La divisi\u00f3n no da exacta \u2014 revis\u00e1 los valores</p>'
+            elif _rep is None:
+                _aviso = (f'<p class="ok">= {_n} pulsos por ficha</p>'
+                          '<small>La caja todav\u00eda no report\u00f3 con cu\u00e1ntos pulsos trabaja. '
+                          'Aparece ac\u00e1 con el pr\u00f3ximo latido (hasta 1 min).</small>')
+            elif _rep == _n:
+                _aviso = f'<p class="ok">= {_n} pulsos por ficha \u00b7 la caja confirma {_rep}</p>'
+            else:
+                _aviso = (f'<p class="mal">Guardado: {_n} pulsos por ficha, '
+                          f'pero la caja est\u00e1 usando {_rep}.</p>'
+                          '<small>Se aplica en el pr\u00f3ximo pago. Si despu\u00e9s de un pago sigue '
+                          'distinto, el ESP tiene firmware viejo y est\u00e1 ignorando el campo.</small>')
             campo_fichas = f"""
     <hr>
     <label>Crédito por ficha en la placa (ARS)</label>
@@ -3367,7 +3391,16 @@ def mqtt_liveness_loop():
                     _registrar_corte(caja, ahora, gap)
             except (ValueError, TypeError):
                 pass
-        actualizar_dispositivo(caja, {"ultimo_poll": ahora.isoformat()})
+        _campos = {"ultimo_poll": ahora.isoformat()}
+        # El ESP informa con cuantos pulsos por ficha quedo trabajando. Va en el
+        # mismo UPDATE que el contacto para no agregar otra escritura por minuto.
+        try:
+            _pf = int(data.get("pulsos_ficha"))
+            if 1 <= _pf <= PULSOS_MAX:
+                _campos["pulsos_reportados"] = _pf
+        except (TypeError, ValueError):
+            pass
+        actualizar_dispositivo(caja, _campos)
         # Re-armar el QR si venció: las cajas MQTT no pollean /orden, así que
         # nadie más les renueva la orden del QR (que expira a los 15 min).
         # El heartbeat (cada 60s) lo mantiene siempre vigente.

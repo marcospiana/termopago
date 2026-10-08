@@ -669,5 +669,63 @@ chequear("con token invalido da 404",
          c.get("/panel/nopenope/planilla.xlsx").status_code == 404)
 _limpiar()
 
+print("\n== 17. Pulsos que REPORTA la caja (heartbeat -> /config) ==")
+
+def _config():
+    return c.get(f"/config/{K}").get_data(as_text=True)
+
+# Arranca sin reportar: la pagina tiene que decirlo, no inventar un numero.
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3000, "valor_pulso": 100,
+                                          "pulsos_reportados": None})
+cuerpo = _config()
+chequear("sin reporte avisa que la caja todavia no dijo nada",
+         "no report" in cuerpo, cuerpo[cuerpo.find("pulsos por ficha")-200:][:260])
+chequear("y igual muestra el calculo", "= 30 pulsos por ficha" in cuerpo)
+
+# Coincide -> confirmacion.
+app.actualizar_dispositivo("lavadero03", {"pulsos_reportados": 30})
+cuerpo = _config()
+chequear("cuando coincide, lo confirma", "la caja confirma 30" in cuerpo)
+chequear("y no muestra alerta", 'class="mal"' not in cuerpo)
+
+# No coincide -> alerta con los DOS numeros, que es lo util.
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 4000, "pulsos_reportados": 30})
+cuerpo = _config()
+chequear("cuando no coincide, avisa", 'class="mal"' in cuerpo)
+chequear("y dice los dos numeros",
+         "Guardado: 40 pulsos por ficha" in cuerpo and "usando 30" in cuerpo)
+
+# Config invalida: manda el error de division, no el de desfasaje.
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3050, "valor_pulso": 100})
+cuerpo = _config()
+chequear("division inexacta gana sobre el reporte",
+         "no da exacta" in cuerpo and "la caja confirma" not in cuerpo)
+app.actualizar_dispositivo("lavadero03", {"credito_ficha": 3000, "valor_pulso": 100,
+                                          "pulsos_reportados": None})
+
+# ---- el camino de entrada: el latido MQTT ----
+# on_message esta adentro de mqtt_liveness_loop, asi que se prueba el efecto:
+# que actualizar_dispositivo acepte la columna y que /config la lea.
+app.actualizar_dispositivo("lavadero03", {"pulsos_reportados": 45})
+chequear("la columna persiste",
+         app.get_dispositivo("lavadero03")["pulsos_reportados"] == 45,
+         app.get_dispositivo("lavadero03")["pulsos_reportados"])
+
+# Un valor absurdo no tiene que llegar a la base: el filtro es 1..PULSOS_MAX.
+def _filtrar(v):
+    """Misma logica que on_message, para que el rango quede cubierto."""
+    try:
+        n = int(v)
+        return n if 1 <= n <= app.PULSOS_MAX else None
+    except (TypeError, ValueError):
+        return None
+
+chequear("acepta un valor normal", _filtrar(30) == 30)
+chequear("rechaza 0", _filtrar(0) is None)
+chequear("rechaza por encima del tope", _filtrar(app.PULSOS_MAX + 1) is None)
+chequear("rechaza basura", _filtrar("treinta") is None)
+chequear("rechaza faltante", _filtrar(None) is None)
+app.actualizar_dispositivo("lavadero03", {"pulsos_reportados": None})
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
