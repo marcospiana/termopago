@@ -1,9 +1,10 @@
-from flask import Flask, jsonify, request, redirect
+from flask import Flask, jsonify, request, redirect, Response
 import mercadopago
 import os
 import psycopg2
 import psycopg2.extras
 import uuid
+import io
 import secrets
 import requests
 import threading
@@ -355,6 +356,13 @@ def init_db():
     # hasta cuando queda bloqueado el regalo para ese cliente
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_fallidos INTEGER")
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_bloqueado_hasta TEXT")
+    # pin_premio: segundo codigo para entregar fichas. El PIN que se usa define
+    # COMO queda registrada la entrega (regalo vs premio por carga), asi el
+    # motivo no depende de lo que el usuario apriete sino del codigo que tiene.
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_premio TEXT")
+    # motivo: por que se entrego una ficha sin cobrar ('regalo' | 'premio').
+    # NULL en las filas viejas = regalo, que era lo unico que existia.
+    cur.execute("ALTER TABLE ordenes ADD COLUMN IF NOT EXISTS motivo TEXT")
     # cortes: registro de desconexiones (huecos > 30s en el polling del ESP32)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cortes (
@@ -526,7 +534,7 @@ def actualizar_dispositivo(disp_id, campos):
     cur.close()
     conn.close()
 
-def insertar_orden(orden_id, dispositivo_id, segundos, monto=None):
+def insertar_orden(orden_id, dispositivo_id, segundos, monto=None, motivo=None):
     """Inserta una orden. El PK evita duplicados si MP notifica dos veces."""
     try:
         monto = float(monto) if monto is not None else None
@@ -535,9 +543,9 @@ def insertar_orden(orden_id, dispositivo_id, segundos, monto=None):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha, monto) VALUES (%s, %s, %s, %s, %s, %s) "
-        "ON CONFLICT (id) DO NOTHING",
-        (orden_id, dispositivo_id, segundos, "pendiente", ahora_ar().isoformat(), monto)
+        "INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha, monto, motivo) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+        (orden_id, dispositivo_id, segundos, "pendiente", ahora_ar().isoformat(), monto, motivo)
     )
     conn.commit()
     cur.close()
@@ -1061,6 +1069,14 @@ def panel_link(clave, alias):
 # unico lugar donde el freno es confiable.
 GIFT_COOLDOWN_S = 20
 
+# Motivos por los que se entrega una ficha sin cobrar. La clave se guarda en
+# ordenes.motivo; el texto es lo que ve el cliente en el panel y en la planilla.
+MOTIVOS = {"regalo": "Regalo", "premio": "Premio por carga"}
+MOTIVO_DEFECTO = "regalo"   # filas viejas, de cuando habia un solo PIN
+
+def texto_motivo(m):
+    return MOTIVOS.get((m or MOTIVO_DEFECTO), MOTIVOS[MOTIVO_DEFECTO])
+
 def segundos_desde_ultimo_regalo(disp_id):
     """Segundos desde el ultimo regalo de esa maquina. None si nunca hubo."""
     conn = get_db()
@@ -1082,8 +1098,9 @@ def regalar_ficha(cli, mis, pin_ingresado):
     """El cliente regala 1 ficha desde su panel, validando su PIN. Se registra
     como orden 'gift_' -> NO cuenta como venta, pero queda el rastro."""
     alias = cli["alias"]
-    pin_real = (cli.get("pin") or "").strip()
-    if not pin_real:
+    pin_regalo = (cli.get("pin") or "").strip()
+    pin_premio = (cli.get("pin_premio") or "").strip()
+    if not pin_regalo and not pin_premio:
         return "No tenes PIN configurado todavia. Pediselo a TermoPago."
 
     # Freno de fuerza bruta: un PIN son 4 digitos = 10.000 combinaciones, o sea
@@ -1102,7 +1119,14 @@ def regalar_ficha(cli, mis, pin_ingresado):
             return (f"Demasiados intentos con el PIN equivocado. "
                     f"Proba de nuevo en {faltan} minuto(s).")
 
-    if (pin_ingresado or "").strip() != pin_real:
+    # El motivo lo define QUE codigo escribieron, no un campo del formulario:
+    # asi nadie puede registrar una entrega con un motivo que no le corresponde.
+    ingresado = (pin_ingresado or "").strip()
+    if   ingresado and ingresado == pin_regalo: motivo = "regalo"
+    elif ingresado and ingresado == pin_premio: motivo = "premio"
+    else:                                       motivo = None
+
+    if motivo is None:
         fallidos = int(cli.get("pin_fallidos") or 0) + 1
         if fallidos >= PIN_MAX_INTENTOS:
             guardar_cliente(alias, {
@@ -1110,11 +1134,11 @@ def regalar_ficha(cli, mis, pin_ingresado):
                 "pin_bloqueado_hasta": (ahora + timedelta(minutes=PIN_BLOQUEO_MIN)).isoformat(),
             })
             print(f"[PIN] {alias}: {PIN_MAX_INTENTOS} intentos fallidos -> bloqueado {PIN_BLOQUEO_MIN} min")
-            return (f"PIN incorrecto. Por seguridad se bloqueo el regalo de fichas "
+            return (f"PIN incorrecto. Por seguridad se bloqueo la entrega de fichas "
                     f"por {PIN_BLOQUEO_MIN} minutos.")
         guardar_cliente(alias, {"pin_fallidos": fallidos})
         restantes = PIN_MAX_INTENTOS - fallidos
-        return (f"PIN incorrecto. No se regalo ninguna ficha. "
+        return (f"PIN incorrecto. No se entrego ninguna ficha. "
                 f"Te queda(n) {restantes} intento(s) antes de que se bloquee.")
 
     # PIN correcto: se limpia el contador y cualquier bloqueo pendiente.
@@ -1142,12 +1166,15 @@ def regalar_ficha(cli, mis, pin_ingresado):
                     f"Si querés regalar otra, espera {faltan}s.")
         oid = "gift_" + uuid.uuid4().hex[:16]
         if publicar_activacion(d["id"], oid, segundos_override=1):
-            insertar_orden(oid, d["id"], 1, 0)
+            insertar_orden(oid, d["id"], 1, 0, motivo=motivo)
             marcar_orden(oid, "regalada")
             regaladas += 1
     if regaladas:
-        return f"🎁 Listo! Regalaste {regaladas} ficha(s). Ya sale de la maquina."
-    return "No se pudo regalar (MQTT sin configurar o error de envio)."
+        # Decimos COMO quedo registrada: es la confirmacion de que usaron el
+        # codigo que querian usar.
+        return (f"🎟 Listo! {regaladas} ficha(s). "
+                f"Registrada como: {texto_motivo(motivo)}.")
+    return "No se pudo entregar (MQTT sin configurar o error de envio)."
 
 
 @app.route("/panel/<token>", methods=["GET", "POST"])
@@ -1228,7 +1255,7 @@ def panel_cliente(token):
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            r"""SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado
+            r"""SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, estado, motivo
                 FROM ordenes WHERE dispositivo_id IN %s
                 AND (id LIKE 'ord\_%%' OR id LIKE 'pay\_%%' OR id LIKE 'mo\_%%' OR id LIKE 'gift\_%%')
                 ORDER BY fecha DESC""",
@@ -1250,27 +1277,51 @@ def panel_cliente(token):
             if dia[:7] == mes_actual:
                 tot_mes["ventas"] += 1; tot_mes["monto"] += m
 
-    regaladas_mes = 0
+    # Entregas sin cargo del mes, separadas por motivo.
+    por_motivo_mes = {k: 0 for k in MOTIVOS}
     if mis_ids:
         conn = get_db(); cur = conn.cursor()
-        cur.execute(r"""SELECT fecha FROM ordenes WHERE dispositivo_id IN %s AND id LIKE 'gift\_%%'""", (mis_ids,))
+        cur.execute(r"""SELECT fecha, motivo FROM ordenes
+                        WHERE dispositivo_id IN %s AND id LIKE 'gift\_%%'""", (mis_ids,))
         for rg in cur.fetchall():
             if (rg["fecha"] or "")[:7] == ahora.strftime("%Y-%m"):
-                regaladas_mes += 1
+                k = rg["motivo"] if rg["motivo"] in MOTIVOS else MOTIVO_DEFECTO
+                por_motivo_mes[k] += 1
         cur.close(); conn.close()
+    total_sin_cargo_mes = sum(por_motivo_mes.values())
 
     bloque_regalo = ""
     if any(d["id"] in ESTACIONES_FICHAS for d in mis):
+        detalle = " · ".join(f"{MOTIVOS[k]}: <b>{por_motivo_mes[k]}</b>" for k in MOTIVOS)
         bloque_regalo = (
-            '<h3>🎁 Regalar una ficha</h3>'
+            '<h3>🎟 Entregar una ficha</h3>'
             '<form method="post">'
             '<input type="hidden" name="accion" value="regalar">'
-            '<label>Tu PIN</label>'
-            '<input type="text" inputmode="numeric" name="pin" placeholder="PIN" autocomplete="off">'
-            '<button type="submit" onclick="this.disabled=true;this.form.submit();">Regalar 1 ficha</button>'
+            '<label>Código</label>'
+            '<input type="text" inputmode="numeric" name="pin" placeholder="Código de 4 dígitos" autocomplete="off">'
+            '<button type="submit" onclick="this.disabled=true;this.form.submit();">Entregar 1 ficha</button>'
             '</form>'
-            f'<p class="sub">Regalaste {regaladas_mes} ficha(s) este mes.</p>'
+            '<p class="sub">Según el código que uses, la entrega queda registrada '
+            'como <b>regalo</b> o como <b>premio por carga</b>.</p>'
+            f'<p class="sub">Este mes: {detalle} · total {total_sin_cargo_mes}.</p>'
         )
+
+    # Descarga a Excel. Las fechas por defecto cubren el mes en curso, que es
+    # el corte que el cliente usa para cerrar: si quiere otro rango, lo cambia.
+    _desde_def = ahora.strftime("%Y-%m-01")
+    _hasta_def = ahora.strftime("%Y-%m-%d")
+    bloque_descarga = (
+        '<h3>\U0001F4C4 Descargar planilla</h3>'
+        f'<form method="get" action="/panel/{token}/planilla.xlsx" class="rango">'
+        '<label>Desde</label>'
+        f'<input type="date" name="desde" value="{_desde_def}">'
+        '<label>Hasta</label>'
+        f'<input type="date" name="hasta" value="{_hasta_def}">'
+        '<button type="submit">Descargar Excel</button>'
+        '</form>'
+        '<p class="sub">Trae tres hojas: ventas cobradas, entregas sin cargo '
+        '(con su motivo) y un resumen por d\u00eda.</p>'
+    )
 
     def tarjeta(t, d):
         return (f'<div class="card"><div class="ct">{t}</div>'
@@ -1301,9 +1352,10 @@ def panel_cliente(token):
     for o in regalo_rows:
         dia, hora = _dia_hora(o)
         filas_regalos += (f'<tr><td>{dia}</td><td><b>{hora}</b></td>'
-                          f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td></tr>')
+                          f'<td>{nombres.get(o["dispositivo_id"], o["dispositivo_id"])}</td>'
+                          f'<td>{texto_motivo(o.get("motivo"))}</td></tr>')
     if not filas_regalos:
-        filas_regalos = '<tr><td colspan="3">Sin regaladas todavia</td></tr>'
+        filas_regalos = '<tr><td colspan="4">Sin entregas sin cargo todavia</td></tr>'
 
     filas_dia = ""
     for k in sorted(por_dia.keys(), reverse=True)[:30]:
@@ -1321,6 +1373,9 @@ def panel_cliente(token):
   h2 {{ margin-bottom: 2px; }}
   h3 {{ margin: 26px 0 8px; color:#1b4f72; }}
   .sub {{ color:#888; font-size:13px; margin-bottom:12px; }}
+  .rango {{ display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }}
+  .rango label {{ font-size:13px; color:#555; display:block; }}
+  .rango input {{ padding:6px; }}
   .est {{ background:#f4f8fb; border:1px solid #dce6ee; border-radius:10px; padding:12px 14px; margin-top:10px; }}
   .en {{ font-weight:bold; }}
   .eh {{ color:#888; font-size:13px; margin-top:2px; }}
@@ -1350,6 +1405,7 @@ def panel_cliente(token):
 <h3>📊 Ventas</h3>
 <div class="cards">{tarjeta("Hoy", tot_hoy)}{tarjeta("Este mes", tot_mes)}{tarjeta("Historico", tot_all)}</div>
 
+{bloque_descarga}
 {bloque_regalo}
 
 <h3>💲 Precio y cantidad</h3>
@@ -1360,7 +1416,7 @@ def panel_cliente(token):
 <table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th style="text-align:right">Monto</th></tr>{filas_hist}</table>
 
 <h3>🎁 Fichas regaladas</h3>
-<table><tr><th>Dia</th><th>Hora</th><th>Maquina</th></tr>{filas_regalos}</table>
+<table><tr><th>Dia</th><th>Hora</th><th>Maquina</th><th>Motivo</th></tr>{filas_regalos}</table>
 
 <h3>📅 Por dia (ultimos 30)</h3>
 <table><tr><th>Dia</th><th>Ventas</th><th>Facturado</th></tr>{filas_dia}</table>
@@ -1427,9 +1483,24 @@ def asegurar_panel(alias):
         guardar_cliente(alias, {"panel_token": token})
     pin = cli.get("pin")
     if not pin:
-        pin = f"{secrets.randbelow(10000):04d}"
+        pin = _pin_nuevo()
         guardar_cliente(alias, {"pin": pin})
-    return f"{BASE_URL}/panel/{token}", pin
+    pin_premio = cli.get("pin_premio")
+    if not pin_premio:
+        pin_premio = _pin_nuevo(distinto_de=pin)
+        guardar_cliente(alias, {"pin_premio": pin_premio})
+    return f"{BASE_URL}/panel/{token}", pin, pin_premio
+
+def _pin_nuevo(distinto_de=""):
+    """PIN de 4 digitos, garantizando que no coincida con el otro codigo del
+    cliente: si los dos fueran iguales no se podria saber si la entrega fue
+    regalo o premio."""
+    for _ in range(50):
+        p = f"{secrets.randbelow(10000):04d}"
+        if p != (distinto_de or ""):
+            return p
+    return p
+
 
 def link_oauth(alias):
     if not (MP_CLIENT_ID and MP_CLIENT_SECRET):
@@ -1472,9 +1543,10 @@ def _admin_post(clave):
         if get_cliente(alias):
             return f"❌ Ya existe un cliente con el alias '{alias}'."
         guardar_cliente(alias, {"nombre": nombre or alias})
-        panel, pin = asegurar_panel(alias)
+        panel, pin, pin_premio = asegurar_panel(alias)
         return (f"✅ Cliente <b>{_esc(nombre or alias)}</b> creado. "
-                f"Panel: <a href='{panel}'>{panel}</a> · PIN {pin}. "
+                f"Panel: <a href='{panel}'>{panel}</a> · código regalo {pin} · "
+                f"código premio por carga {pin_premio}. "
                 f"Ahora conectá su cuenta de MercadoPago y agregale las máquinas.")
 
     if accion == "nueva_maquina":
@@ -1536,15 +1608,19 @@ def _admin_post(clave):
 
     if accion == "nuevo_pin":
         alias = request.form.get("alias")
+        cual = request.form.get("cual", "regalo")      # 'regalo' | 'premio'
         cli = get_cliente(alias)
         if not cli:
             return "❌ No existe ese cliente."
-        pin = f"{secrets.randbelow(10000):04d}"
+        campo = "pin_premio" if cual == "premio" else "pin"
+        otro  = (cli.get("pin") if cual == "premio" else cli.get("pin_premio")) or ""
+        pin = _pin_nuevo(distinto_de=otro)
         # PIN nuevo = borrón y cuenta nueva: se levanta cualquier bloqueo por
         # intentos fallidos, así el cliente puede usarlo en el momento.
-        guardar_cliente(alias, {"pin": pin, "pin_fallidos": 0, "pin_bloqueado_hasta": None})
-        return (f"🔑 PIN nuevo de <b>{_esc(cli.get('nombre') or alias)}</b>: <b>{pin}</b>. "
-                f"El anterior dejó de servir para regalar fichas — pasale este.")
+        guardar_cliente(alias, {campo: pin, "pin_fallidos": 0, "pin_bloqueado_hasta": None})
+        return (f"🔑 Código de <b>{MOTIVOS.get(cual, cual)}</b> nuevo de "
+                f"<b>{_esc(cli.get('nombre') or alias)}</b>: <b>{pin}</b>. "
+                f"El anterior dejó de servir — pasale este.")
 
     if accion == "nuevo_link":
         alias = request.form.get("alias")
@@ -1690,7 +1766,7 @@ def admin_panel(clave):
     for cli in clientes:
         alias = cli["alias"]
         maquinas = por_cliente.get(alias, [])
-        panel, pin = asegurar_panel(alias)
+        panel, pin, pin_premio = asegurar_panel(alias)
         tiene_oauth = bool(cli.get("access_token"))
         oauth = link_oauth(alias)
         if tiene_oauth:
@@ -1718,12 +1794,21 @@ def admin_panel(clave):
     <h2>{_esc(cli.get('nombre') or alias)} <small class="mut">{_esc(alias)}</small></h2>
     <p class="meta">{estado_mp}
        · Panel del cliente: <a href="{panel}" target="_blank">{panel}</a>
-       · PIN {_esc(pin)}
+       · Código regalo <b>{_esc(pin)}</b>
       <form method="post" style="display:inline"
-            onsubmit="return confirm('Generar un PIN nuevo? El actual deja de servir.')">
+            onsubmit="return confirm('Generar un código de REGALO nuevo? El actual deja de servir.')">
         <input type="hidden" name="accion" value="nuevo_pin">
+        <input type="hidden" name="cual" value="regalo">
         <input type="hidden" name="alias" value="{_esc(alias)}">
-        <button class="btn mini gris" type="submit">PIN nuevo</button>
+        <button class="btn mini gris" type="submit">Nuevo</button>
+      </form>
+       · Código premio por carga <b>{_esc(pin_premio)}</b>
+      <form method="post" style="display:inline"
+            onsubmit="return confirm('Generar un código de PREMIO nuevo? El actual deja de servir.')">
+        <input type="hidden" name="accion" value="nuevo_pin">
+        <input type="hidden" name="cual" value="premio">
+        <input type="hidden" name="alias" value="{_esc(alias)}">
+        <button class="btn mini gris" type="submit">Nuevo</button>
       </form>
       <form method="post" style="display:inline"
             onsubmit="return confirm('Generar un link nuevo? El actual deja de abrir.')">
@@ -2325,6 +2410,124 @@ def rearmar_manual(clave, disp_id):
     return jsonify({"dispositivo": disp_id, "orden_qr_id": disp.get("orden_qr_id")})
 
 # ─── Panel de configuración ──────────────────────────────────────
+
+@app.route("/panel/<token>/planilla.xlsx")
+def panel_planilla(token):
+    """Exporta a Excel lo que el cliente ve en su panel, en el rango pedido.
+
+    Tres hojas: ventas cobradas, entregas sin cargo (con el motivo) y un
+    resumen por dia. Se escriben fechas y numeros como tales, no como texto,
+    para que el cliente pueda ordenar y hacer tablas dinamicas sin pelear."""
+    cli = get_cliente_por_token(token)
+    if not cli:
+        return "<h2>Link invalido</h2>", 404
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return ("<h2>Falta la libreria openpyxl</h2>"
+                "<p>Agregala a requirements.txt y volve a desplegar.</p>"), 500
+
+    alias = cli["alias"]
+    mis = [d for d in get_dispositivos() if d.get("cliente") == alias]
+    nombres = {d["id"]: d["nombre"] for d in mis}
+    mis_ids = tuple(d["id"] for d in mis)
+
+    # Rango: por defecto el mes en curso. Se comparan como texto ISO
+    # (YYYY-MM-DD), que ordena igual que la fecha.
+    hoy = ahora_ar()
+    desde = (request.args.get("desde") or hoy.strftime("%Y-%m-01"))[:10]
+    hasta = (request.args.get("hasta") or hoy.strftime("%Y-%m-%d"))[:10]
+    if desde > hasta:
+        desde, hasta = hasta, desde
+
+    filas = []
+    if mis_ids:
+        conn = get_db()
+        cur = conn.cursor()
+        # Traemos todo y clasificamos en Python por prefijo del id. Con LIKE
+        # haria falta ESCAPE para que '\_' sea un guion bajo literal, y eso
+        # se comporta distinto en SQLite y en Postgres: no vale la pena.
+        cur.execute(
+            """SELECT id, dispositivo_id, fecha, COALESCE(monto,0) AS monto, motivo
+                FROM ordenes WHERE dispositivo_id IN %s
+                ORDER BY fecha""",
+            (mis_ids,))
+        filas = cur.fetchall()
+        cur.close()
+        conn.close()
+
+    def _partes(f):
+        """(fecha date, hora 'HH:MM') desde el ISO guardado."""
+        f = f or ""
+        try:
+            return datetime.fromisoformat(f).date(), f[11:16]
+        except (ValueError, TypeError):
+            return None, f[11:16]
+
+    PREFIJOS_VENTA = ("ord_", "pay_", "mo_")
+    ventas, sin_cargo, por_dia = [], [], {}
+    for r in filas:
+        oid = r["id"] or ""
+        if not (oid.startswith("gift_") or oid.startswith(PREFIJOS_VENTA)):
+            continue
+        dia_txt = (r["fecha"] or "")[:10]
+        if not (desde <= dia_txt <= hasta):
+            continue
+        d, hora = _partes(r["fecha"])
+        maq = nombres.get(r["dispositivo_id"], r["dispositivo_id"])
+        if (r["id"] or "").startswith("gift_"):
+            sin_cargo.append((d, hora, maq, texto_motivo(r["motivo"])))
+        else:
+            monto = float(r["monto"] or 0)
+            ventas.append((d, hora, maq, monto))
+            acc = por_dia.setdefault(dia_txt, [0, 0.0])
+            acc[0] += 1
+            acc[1] += monto
+
+    wb = Workbook()
+    negrita = Font(bold=True)
+
+    def hoja(ws, encabezados, datos, anchos):
+        ws.append(encabezados)
+        for c in ws[1]:
+            c.font = negrita
+        for fila in datos:
+            ws.append(list(fila))
+        for i, an in enumerate(anchos, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = an
+        ws.freeze_panes = "A2"      # el encabezado queda fijo al scrollear
+        for fila in ws.iter_rows(min_row=2):
+            if fila[0].value is not None:
+                fila[0].number_format = "DD/MM/YYYY"
+        return ws
+
+    ws1 = wb.active
+    ws1.title = "Ventas"
+    hoja(ws1, ["Fecha", "Hora", "Maquina", "Monto"], ventas, [12, 8, 26, 12])
+    for fila in ws1.iter_rows(min_row=2, min_col=4, max_col=4):
+        fila[0].number_format = '"$"#,##0'
+
+    hoja(wb.create_sheet("Entregas sin cargo"),
+         ["Fecha", "Hora", "Maquina", "Motivo"], sin_cargo, [12, 8, 26, 20])
+
+    resumen = [(datetime.fromisoformat(k).date(), v[0], v[1])
+               for k, v in sorted(por_dia.items())]
+    ws3 = hoja(wb.create_sheet("Resumen por dia"),
+               ["Fecha", "Ventas", "Monto"], resumen, [12, 10, 14])
+    for fila in ws3.iter_rows(min_row=2, min_col=3, max_col=3):
+        fila[0].number_format = '"$"#,##0'
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nombre = f"termopago_{alias}_{desde}_a_{hasta}.xlsx"
+    return Response(
+        buf.read(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
+
 
 @app.route("/config/<clave>", methods=["GET", "POST"])
 def config_panel(clave):

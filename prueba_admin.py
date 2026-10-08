@@ -340,7 +340,7 @@ for i in range(1, app.PIN_MAX_INTENTOS):
              f"Te queda(n) {app.PIN_MAX_INTENTOS - i}".encode() in r.data, r.data[-400:])
 
 r = _regalo(pin_malo)
-chequear("al llegar al tope se bloquea", "se bloqueo el regalo".encode() in r.data, r.data[-400:])
+chequear("al llegar al tope se bloquea", "se bloqueo la entrega".encode() in r.data, r.data[-400:])
 chequear("quedo grabado el bloqueo en la DB",
          bool(app.get_cliente("lavadero")["pin_bloqueado_hasta"]))
 
@@ -547,6 +547,127 @@ app.actualizar_dispositivo("lavadero03", {"segundos": 1})
 t2 = app.titulo_orden(app.get_dispositivo("lavadero01"))
 chequear("las de tiempo siguen diciendo los minutos", "minutos" in t2, t2)
 chequear("y NO llevan el nombre del cliente pegado", not t2.endswith("Lavadero"), t2)
+
+print("\n== 15. Dos codigos: regalo y premio por carga ==")
+cli = app.get_cliente("lavadero")
+tok = cli["panel_token"]
+app.asegurar_panel("lavadero")                 # crea el pin_premio si falta
+cli = app.get_cliente("lavadero")
+pin_regalo, pin_premio = cli["pin"], cli["pin_premio"]
+
+chequear("se genero el segundo codigo", bool(pin_premio), pin_premio)
+chequear("y es distinto del primero", pin_regalo != pin_premio, (pin_regalo, pin_premio))
+
+def _limpiar():
+    app.guardar_cliente("lavadero", {"pin_fallidos": 0, "pin_bloqueado_hasta": None})
+    app.actualizar_dispositivo("lavadero03", {"ultimo_poll": app.ahora_ar().isoformat()})
+    conn = app.get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM ordenes WHERE id LIKE 'gift_%%'")
+    conn.commit(); cur.close(); conn.close()
+
+def _motivos():
+    conn = app.get_db(); cur = conn.cursor()
+    cur.execute("SELECT motivo FROM ordenes WHERE id LIKE 'gift_%%' ORDER BY fecha")
+    r = [x["motivo"] for x in cur.fetchall()]; cur.close(); conn.close()
+    return r
+
+_limpiar()
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_regalo}, follow_redirects=True)
+chequear("el codigo de regalo entrega", _motivos() == ["regalo"], _motivos())
+chequear("y el mensaje dice como quedo", "Regalo" in r.get_data(as_text=True))
+
+_limpiar()
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_premio}, follow_redirects=True)
+chequear("el codigo de premio entrega", _motivos() == ["premio"], _motivos())
+chequear("y lo identifica como premio por carga",
+         "Premio por carga" in r.get_data(as_text=True))
+
+# El motivo sale del CODIGO, no del formulario: mandar motivo a mano no sirve.
+_limpiar()
+c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_regalo, "motivo": "premio"},
+       follow_redirects=True)
+chequear("no se puede falsear el motivo desde el formulario",
+         _motivos() == ["regalo"], _motivos())
+
+# Los dos codigos comparten el contador de intentos fallidos: si no, un
+# atacante tendria el doble de chances.
+_limpiar()
+_cli = app.get_cliente('lavadero')
+_malo = next(f'{n:04d}' for n in range(10000)
+             if f'{n:04d}' not in (_cli['pin'], _cli['pin_premio']))
+for _ in range(app.PIN_MAX_INTENTOS):
+    r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": _malo}, follow_redirects=True)
+chequear("el tope de intentos es compartido por los dos codigos",
+         bool(app.get_cliente("lavadero")["pin_bloqueado_hasta"]))
+r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_premio}, follow_redirects=True)
+chequear("bloqueado, el codigo de premio tampoco pasa", _motivos() == [], _motivos())
+_limpiar()
+
+# El panel muestra los dos contadores y la columna de motivo.
+c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_premio}, follow_redirects=True)
+r = c.get(f"/panel/{tok}")
+cuerpo = r.get_data(as_text=True)
+chequear("el panel nombra los dos motivos",
+         "Regalo" in cuerpo and "Premio por carga" in cuerpo)
+chequear("la tabla tiene columna Motivo", "<th>Motivo</th>" in cuerpo)
+
+# Admin: se ven y se renuevan los dos por separado.
+r = c.get(f"/admin/{K}")
+adm = r.get_data(as_text=True)
+chequear("el admin muestra el codigo de regalo", "digo regalo" in adm)
+chequear("y el de premio por carga", "digo premio por carga" in adm)
+_antes = app.get_cliente("lavadero")["pin"]
+c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": "lavadero", "cual": "premio"})
+chequear("renovar el de premio NO toca el de regalo",
+         app.get_cliente("lavadero")["pin"] == _antes)
+chequear("y cambia el de premio",
+         app.get_cliente("lavadero")["pin_premio"] != pin_premio)
+
+print("\n== 16. Planilla Excel ==")
+_limpiar()
+hoy = app.ahora_ar()
+app.insertar_orden("ord_x1", "lavadero03", 1, 1500)
+c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": app.get_cliente("lavadero")["pin"]},
+       follow_redirects=True)
+
+d1 = hoy.strftime("%Y-%m-01"); d2 = hoy.strftime("%Y-%m-%d")
+r = c.get(f"/panel/{tok}/planilla.xlsx?desde={d1}&hasta={d2}")
+chequear("la planilla descarga", r.status_code == 200, r.status_code)
+chequear("es un xlsx de verdad", r.data[:2] == b"PK", r.data[:8])
+chequear("va como adjunto con nombre",
+         ".xlsx" in r.headers.get("Content-Disposition", ""),
+         r.headers.get("Content-Disposition"))
+
+import openpyxl, io as _io
+wb = openpyxl.load_workbook(_io.BytesIO(r.data))
+chequear("trae las tres hojas",
+         wb.sheetnames == ["Ventas", "Entregas sin cargo", "Resumen por dia"],
+         wb.sheetnames)
+hv = wb["Ventas"]
+chequear("la hoja de ventas tiene encabezado",
+         [c0.value for c0 in hv[1]] == ["Fecha", "Hora", "Maquina", "Monto"],
+         [c0.value for c0 in hv[1]])
+chequear("y el monto es numero, no texto",
+         isinstance(hv.cell(row=2, column=4).value, (int, float)),
+         type(hv.cell(row=2, column=4).value).__name__)
+chequear("la fecha es fecha, no texto",
+         hasattr(hv.cell(row=2, column=1).value, "year"),
+         type(hv.cell(row=2, column=1).value).__name__)
+hs = wb["Entregas sin cargo"]
+chequear("la hoja sin cargo trae el motivo",
+         hs.cell(row=2, column=4).value in ("Regalo", "Premio por carga"),
+         hs.cell(row=2, column=4).value)
+
+# El rango filtra de verdad.
+r2 = c.get(f"/panel/{tok}/planilla.xlsx?desde=2020-01-01&hasta=2020-01-31")
+wb2 = openpyxl.load_workbook(_io.BytesIO(r2.data))
+chequear("un rango sin datos da hojas vacias", wb2["Ventas"].max_row == 1,
+         wb2["Ventas"].max_row)
+
+# Token invalido no descarga nada.
+chequear("con token invalido da 404",
+         c.get("/panel/nopenope/planilla.xlsx").status_code == 404)
+_limpiar()
 
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
