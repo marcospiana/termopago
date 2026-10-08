@@ -163,7 +163,7 @@ String TOPIC_STATUS= "";   // termopago/<caja>/status  equipo  -> backend (+ LWT
 #define DISP_PULSO_COIN_MS      40
 #define DISP_PAUSA_COIN_MS      60
 
-#define DISP_MAX_FICHAS   20       // tope de fichas por pago (anti-vaciado)
+#define DISP_MAX_FICHAS   5        // tope de fichas por pago (anti-vaciado)
 
 // ---- Boton BOOT (reset de credenciales) ----
 #define BOOT_PIN          0        // GPIO0 = boton BOOT del devkit
