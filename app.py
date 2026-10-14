@@ -55,6 +55,23 @@ ALERTA_OFFLINE_S = int((os.environ.get("ALERTA_OFFLINE_S") or "180").strip() or 
 # asi que hay que re-armar antes. 240 = 4 min (2x de margen). Configurable en Railway.
 REARME_SEGUNDOS = int((os.environ.get("REARME_SEGUNDOS") or "240").strip() or "240")
 
+# ── Will (LWT) rancio ──
+# El client id del ESP es fijo (termopago-<caja>). Cuando reconecta, el broker
+# mata la sesion vieja y al matarla PUBLICA SU WILL: el "offline" aterriza
+# segundos DESPUES del "online" de la misma caja, y con retain=0, asi que el
+# filtro de retenidos no lo tapa. Si la caja tuvo contacto hace menos de esto,
+# esta demostrablemente viva y el will es viejo -> se ignora.
+# El margen: un will REAL llega >=90s despues del ultimo paquete del ESP
+# (keepalive 60s, el broker lo da por muerto a 1.5x). Uno rancio llega a los
+# pocos segundos de un latido. 75 separa los dos casos con holgura.
+LWT_FRESCURA_S = int((os.environ.get("LWT_FRESCURA_S") or "75").strip() or "75")
+
+# ── Suscriptor sordo ──
+# Si el hilo suscriptor se queda sin recibir NADA de NINGUNA caja por mas de
+# esto, el problema es el enlace con el broker, no los equipos. Avisa una sola
+# vez (en vez de una falsa alarma por maquina) y fuerza su propia reconexion.
+SUB_SORDO_S = int((os.environ.get("SUB_SORDO_S") or "180").strip() or "180")
+
 # ─── MQTT: activación push de cajas tipo "pulso" (ej. inflado) ───────
 import ssl
 import json as _json
@@ -3390,6 +3407,67 @@ def _registrar_corte(caja, ahora, gap):
     except Exception as e:
         print(f"Error registrando corte de {caja}: {e}")
 
+def _contacto_fresco(disp, ahora, limite=None):
+    """True si esa caja dio señales de vida hace menos de 'limite' segundos.
+    Se usa para descartar un will (LWT) que llega tarde: si la maquina esta
+    reportando ahora mismo, el "offline" es de una sesion anterior."""
+    up = (disp or {}).get("ultimo_poll")
+    if not up:
+        return False
+    try:
+        return (ahora - datetime.fromisoformat(up)).total_seconds() < (limite or LWT_FRESCURA_S)
+    except (ValueError, TypeError):
+        return False
+
+
+def manejar_offline(caja, disp, ahora=None):
+    """Llego un will (LWT) diciendo que un equipo se fue. Cancela el QR de esa
+    caja y el de sus hermanas del mismo ESP, para que nadie pague una maquina
+    que no va a responder. Cada una se re-arma sola con su proximo heartbeat.
+
+    Saltea las cajas que esten dando señales de vida: un will puede llegar TARDE
+    (ver LWT_FRESCURA_S) y no hay que voltearle el QR a una maquina que esta
+    funcionando. Devuelve la lista de cajas efectivamente canceladas."""
+    ahora = ahora or ahora_ar()
+    if _contacto_fresco(disp, ahora):
+        print(f"LWT de {caja} ignorado: tuvo contacto hace instantes (will de sesion vieja)")
+        return []
+    canceladas = []
+    for hid in cajas_hermanas(caja):
+        hdisp = disp if hid == caja else get_dispositivo(hid)
+        if not hdisp:
+            continue
+        # Cada hermana se juzga por SU propio contacto: si sigue latiendo, no hay
+        # razon para voltearle el QR por el will de la otra.
+        if hid != caja and _contacto_fresco(hdisp, ahora):
+            print(f"QR de {hid} NO se cancela: sigue reportando (will de {caja})")
+            continue
+        if hdisp.get("orden_qr_id"):
+            cancelar_orden_qr(hdisp)
+            actualizar_dispositivo(hid, {"orden_qr_id": None, "ultimo_rearme": None})
+            canceladas.append(hid)
+            print(f"QR de {hid} cancelado: equipo offline (LWT de {caja})")
+    return canceladas
+
+
+# Salud del propio hilo suscriptor: cuando fue la ultima vez que le llego algo
+# de CUALQUIER caja. Si esto envejece, el enlace con el broker se corto y las
+# maquinas pueden estar perfectas.
+_sub_estado = {"ultimo": None, "avisado": False, "client": None}
+
+def _sub_visto():
+    _sub_estado["ultimo"] = ahora_ar()
+
+def suscriptor_sordo(ahora=None):
+    """True si el suscriptor lleva mas de SUB_SORDO_S sin recibir nada de nadie.
+    Mientras arranca (ultimo = None) devuelve False: no hay nada que sospechar
+    todavia."""
+    ultimo = _sub_estado.get("ultimo")
+    if not ultimo:
+        return False
+    return ((ahora or ahora_ar()) - ultimo).total_seconds() > SUB_SORDO_S
+
+
 def mqtt_liveness_loop():
     if not (MQTT_HOST and MQTT_USER and MQTT_PASS):
         print("MQTT liveness: sin credenciales, no arranco el suscriptor")
@@ -3406,6 +3484,7 @@ def mqtt_liveness_loop():
 
     def on_connect(client, userdata, flags, rc, *a):
         client.subscribe("termopago/+/status", qos=1)
+        _sub_visto()           # recien conectado: el reloj de "sordo" arranca de cero
         print("MQTT liveness: suscripto a termopago/+/status")
 
     def on_message(client, userdata, msg):
@@ -3420,22 +3499,17 @@ def mqtt_liveness_loop():
         # en vivo cuentan para liveness/re-arme.
         if getattr(msg, "retain", False):
             return
+        # Llego trafico en vivo: el suscriptor esta escuchando. Se marca ANTES
+        # de mirar si la caja existe, porque lo que importa aca es el enlace con
+        # el broker, no de que maquina vino el mensaje.
+        _sub_visto()
         disp = get_dispositivo(caja)
         if not disp:
             return   # caja desconocida (todavía no dada de alta)
         # el LWT "offline" no actualiza contacto: el corte se calcula cuando
         # vuelve el primer heartbeat "online" (gap contra el último contacto).
         if data.get("estado") == "offline":
-            # Equipo caído: cancelar el QR de TODAS las cajas de ese ESP para que
-            # NADIE pueda pagar una máquina que no va a responder (aunque el LWT
-            # llegue por una sola caja, el ESP es el mismo -> caen todas). Cada
-            # una se re-arma sola con su próximo heartbeat cuando el equipo vuelva.
-            for hid in cajas_hermanas(caja):
-                hdisp = disp if hid == caja else get_dispositivo(hid)
-                if hdisp and hdisp.get("orden_qr_id"):
-                    cancelar_orden_qr(hdisp)
-                    actualizar_dispositivo(hid, {"orden_qr_id": None, "ultimo_rearme": None})
-                    print(f"QR de {hid} cancelado: equipo offline (LWT de {caja})")
+            manejar_offline(caja, disp)
             return
         ahora = ahora_ar()
         up = disp.get("ultimo_poll")
@@ -3475,6 +3549,7 @@ def mqtt_liveness_loop():
     client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
     client.on_connect = on_connect
     client.on_message = on_message
+    _sub_estado["client"] = client     # para que el vigilante pueda forzar reconexion
     while True:
         try:
             client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
@@ -3540,6 +3615,35 @@ def vigilar_equipos():
                 _cx.commit(); _cc.close(); _cx.close()
             except Exception:
                 pass
+            # ¿El problema somos nosotros? Si el suscriptor no recibe nada de
+            # NINGUNA caja, el enlace con el broker se corto y las maquinas
+            # pueden estar perfectas. Avisar una vez por eso, y NO mandar un
+            # "se cayo" por maquina: seria mandar a revisar equipos sanos.
+            # (Paso el 14/10/26: 5 falsas alarmas de 3 estaciones distintas
+            # mientras ningun ESP se habia siquiera reiniciado.)
+            if suscriptor_sordo(ahora):
+                if not _sub_estado["avisado"]:
+                    _sub_estado["avisado"] = True
+                    _ult = _sub_estado.get("ultimo")
+                    _hace = int((ahora - _ult).total_seconds() // 60) if _ult else 0
+                    enviar_telegram(
+                        "⚠️ <b>El backend dejo de recibir latidos</b> del broker MQTT "
+                        f"(hace {_hace} min, ninguna caja).\nLas maquinas pueden estar bien: "
+                        "el que no escucha es el servidor. Reintentando la conexion.")
+                    # Forzar la reconexion en vez de esperar a que se arregle solo:
+                    # disconnect() hace volver a loop_forever() y el bucle reconecta.
+                    try:
+                        _cl = _sub_estado.get("client")
+                        if _cl:
+                            _cl.disconnect()
+                            print("Alertas: suscriptor sordo -> forzando reconexion al broker")
+                    except Exception as e:
+                        print(f"Alertas: no pude forzar la reconexion: {e}")
+                time.sleep(60)
+                continue
+            if _sub_estado["avisado"]:
+                _sub_estado["avisado"] = False
+                enviar_telegram("✅ <b>El backend volvio a recibir latidos</b> del broker MQTT.")
             for caja in ESTACIONES_MQTT:
                 disp = get_dispositivo(caja)
                 if not disp:

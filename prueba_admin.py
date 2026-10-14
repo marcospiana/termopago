@@ -787,5 +787,78 @@ adm = c.get(f"/admin/{K}").get_data(as_text=True)
 chequear("un codigo de hace mas de 6 meses sale marcado",
          "400 dias" in adm, [l for l in adm.split("\n") if "dias)" in l][:1])
 
+print("\n== LWT rancio: un will que llega tarde no debe voltear un QR vivo ==")
+# Caso real del 14/10/26: el client id del ESP es fijo, asi que al reconectar el
+# broker mata la sesion vieja y publica SU will. El "offline" llego DESPUES del
+# "online" (y con retain=0, o sea que el filtro de retenidos no lo tapaba) y el
+# backend cancelo el QR de aspiradora01 y soplado01 estando las dos funcionando.
+
+def _preparar(caja, seg_desde_contacto, con_qr=True):
+    """Deja una caja con su ultimo contacto hace N segundos y un QR armado."""
+    app.actualizar_dispositivo(caja, {
+        "ultimo_poll": (app.ahora_ar() - app.timedelta(seconds=seg_desde_contacto)).isoformat(),
+        "orden_qr_id": ("orden_" + caja) if con_qr else None,
+    })
+
+_canceladas = []
+app.cancelar_orden_qr = lambda d: _canceladas.append(d["id"])
+
+# --- la caja esta viva: el will es viejo, se ignora ---
+_canceladas.clear()
+_preparar("aspiradora01", 5)
+_preparar("soplado01", 5)
+res = app.manejar_offline("aspiradora01", app.get_dispositivo("aspiradora01"))
+chequear("will rancio: no cancela nada", res == [], res)
+chequear("y el QR sigue armado", bool(app.get_dispositivo("aspiradora01")["orden_qr_id"]))
+chequear("tampoco toca a la hermana", bool(app.get_dispositivo("soplado01")["orden_qr_id"]))
+
+# --- la caja esta muerta de verdad: el will manda ---
+_canceladas.clear()
+_preparar("aspiradora01", 300)
+_preparar("soplado01", 300)
+res = app.manejar_offline("aspiradora01", app.get_dispositivo("aspiradora01"))
+chequear("will real: cancela las dos del mismo ESP",
+         set(res) == {"aspiradora01", "soplado01"}, res)
+chequear("y lo hace contra MercadoPago", set(_canceladas) == {"aspiradora01", "soplado01"}, _canceladas)
+chequear("deja el QR vacio para que el proximo latido lo re-arme",
+         not app.get_dispositivo("aspiradora01")["orden_qr_id"])
+
+# --- una murio y la hermana sigue latiendo: solo cae la muerta ---
+_canceladas.clear()
+_preparar("aspiradora01", 300)
+_preparar("soplado01", 5)
+res = app.manejar_offline("aspiradora01", app.get_dispositivo("aspiradora01"))
+chequear("solo cancela la que no responde", res == ["aspiradora01"], res)
+chequear("la hermana que late conserva su QR",
+         bool(app.get_dispositivo("soplado01")["orden_qr_id"]))
+
+# --- el limite esta donde tiene que estar ---
+_ahora = app.ahora_ar()
+_d = lambda seg: {"ultimo_poll": (_ahora - app.timedelta(seconds=seg)).isoformat()}
+chequear("un will REAL llega >=90s despues del ultimo latido -> se respeta",
+         not app._contacto_fresco(_d(90), _ahora))
+chequear("un will RANCIO llega a los pocos segundos -> se descarta",
+         app._contacto_fresco(_d(3), _ahora))
+chequear("una caja que nunca reporto no cuenta como fresca",
+         not app._contacto_fresco({}, _ahora))
+chequear("un ultimo_poll corrupto no rompe ni miente",
+         not app._contacto_fresco({"ultimo_poll": "fecha-rota"}, _ahora))
+
+print("\n== Suscriptor sordo: avisar del backend, no de las maquinas ==")
+app._sub_estado["ultimo"] = None
+chequear("recien arrancado no se declara sordo", not app.suscriptor_sordo())
+app._sub_visto()
+chequear("con trafico reciente no esta sordo", not app.suscriptor_sordo())
+app._sub_estado["ultimo"] = app.ahora_ar() - app.timedelta(seconds=app.SUB_SORDO_S - 10)
+chequear("justo antes del limite todavia no", not app.suscriptor_sordo())
+app._sub_estado["ultimo"] = app.ahora_ar() - app.timedelta(seconds=app.SUB_SORDO_S + 10)
+chequear("pasado el limite si", app.suscriptor_sordo())
+app._sub_visto()
+chequear("un mensaje lo revive", not app.suscriptor_sordo())
+chequear("el umbral del sordo (180s) es mayor que el latido del ESP (60s)",
+         app.SUB_SORDO_S > 60)
+chequear("y el de frescura del will deja pasar un will real (>=90s)",
+         app.LWT_FRESCURA_S < 90, app.LWT_FRESCURA_S)
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
