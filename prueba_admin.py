@@ -188,7 +188,7 @@ c.post(f"/admin/{K}", data={"accion": "nuevo_cliente", "alias": "lavadero", "nom
 cli = app.get_cliente("lavadero")
 chequear("le genero panel_token y pin", bool(cli["panel_token"]) and len(cli["pin"]) == 4)
 
-r = c.post(f"/admin/{K}", data={"accion": "nuevo_cliente", "alias": "lavadero", "nombre": "x"})
+r = c.post(f"/admin/{K}", data={"accion": "nuevo_cliente", "alias": "lavadero", "nombre": "x"}, follow_redirects=True)
 chequear("no deja duplicar alias", "Ya existe".encode() in r.data)
 
 print("\n== 5. Alta de maquinas desde el panel ==")
@@ -225,12 +225,12 @@ chequear("fichas: esp_id vacio cae en su propio id", d["esp_id"] == "lavadero03"
 
 r = c.post(f"/admin/{K}", data={
     "accion": "nueva_maquina", "cliente": "lavadero", "disp_id": "lavadero01",
-    "nombre": "Repetida", "tipo": "pulso", "cuenta": ""})
+    "nombre": "Repetida", "tipo": "pulso", "cuenta": ""}, follow_redirects=True)
 chequear("no deja repetir ID de maquina", "Ya existe".encode() in r.data)
 
 r = c.post(f"/admin/{K}", data={
     "accion": "nueva_maquina", "cliente": "lavadero", "disp_id": "malmal",
-    "nombre": "X", "tipo": "inventado", "cuenta": ""})
+    "nombre": "X", "tipo": "inventado", "cuenta": ""}, follow_redirects=True)
 chequear("rechaza tipo invalido", "inválido".encode() in r.data)
 
 print("\n== 6. El payload MQTT cambia solo con el tipo ==")
@@ -302,11 +302,11 @@ chequear("no toca el PIN", despues["pin"] == ahora_cli["pin"])
 chequear("el link viejo deja de abrir",
          c.get(f"/panel/{antes['panel_token']}").status_code == 404)
 chequear("el link nuevo abre", c.get(f"/panel/{despues['panel_token']}").status_code == 200)
-r = c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": "no_existe"})
+r = c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": "no_existe"}, follow_redirects=True)
 chequear("cliente inexistente no rompe", b"No existe ese cliente" in r.data)
 
 print("\n== 8b. Baja de cliente ==")
-r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "lavadero"})
+r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "lavadero"}, follow_redirects=True)
 chequear("no deja borrar un cliente con maquinas", "todavía tiene".encode() in r.data, r.data[:300])
 chequear("y el cliente sigue existiendo", app.get_cliente("lavadero") is not None)
 # En este punto hay 2 clientes: 'lava_dero' sin maquinas y 'lavadero' con 2.
@@ -319,7 +319,7 @@ chequear("borra un cliente sin maquinas", b"eliminado" in r.data, r.data[:300])
 chequear("desaparecio de la tabla", app.get_cliente("lava_dero") is None)
 chequear("ya no queda ningun boton de baja de cliente",
          c.get(f"/admin/{K}").data.count(b'value="borrar_cliente"') == 0)
-r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "no_existe"})
+r = c.post(f"/admin/{K}", data={"accion": "borrar_cliente", "alias": "no_existe"}, follow_redirects=True)
 chequear("cliente inexistente da error, no rompe", b"No existe ese cliente" in r.data)
 
 print("\n== 8c. Freno de fuerza bruta del PIN ==")
@@ -726,6 +726,66 @@ chequear("rechaza por encima del tope", _filtrar(app.PULSOS_MAX + 1) is None)
 chequear("rechaza basura", _filtrar("treinta") is None)
 chequear("rechaza faltante", _filtrar(None) is None)
 app.actualizar_dispositivo("lavadero03", {"pulsos_reportados": None})
+
+print("\n== 18. El admin no puede reenviar el formulario (PRG) ==")
+# El bug: el admin procesaba el POST y dibujaba la pagina. Un F5, un 'atras' o
+# la restauracion de la pestaña REENVIAN ese POST y la accion corre de nuevo,
+# sin el confirm() del onsubmit. Con 'generar codigo nuevo' eso le cambia el
+# codigo al cliente sin que nadie lo pida.
+cli = app.get_cliente("lavadero") or app.get_cliente("lava_dero")
+_alias = cli["alias"]
+
+r = c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": _alias, "cual": "regalo"})
+chequear("el POST contesta con un redirect, no con la pagina",
+         r.status_code in (302, 303), r.status_code)
+_destino = r.headers.get("Location", "")
+_pin1 = app.get_cliente(_alias)["pin"]
+
+# Esto es el F5: volver a pedir la MISMA url a la que nos mando el redirect.
+for _ in range(3):
+    r2 = c.get(_destino)
+chequear("refrescar despues de generar un codigo NO genera otro",
+         app.get_cliente(_alias)["pin"] == _pin1,
+         (_pin1, app.get_cliente(_alias)["pin"]))
+chequear("y el mensaje se sigue viendo despues del redirect",
+         "digo" in r2.get_data(as_text=True))
+
+# El mensaje viaja por la URL: no puede inyectar HTML al volver.
+r3 = c.get(f"/admin/{K}?m=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E")
+cuerpo = r3.get_data(as_text=True)
+chequear("el mensaje de la URL no inyecta HTML",
+         "<img src=x" not in cuerpo and "&lt;img" in cuerpo)
+
+print("\n== 19. Fecha de cambio de cada codigo ==")
+cli = app.get_cliente(_alias)
+chequear("generar un codigo deja la fecha", bool(cli["pin_cambiado"]), cli["pin_cambiado"])
+chequear("y es de ahora",
+         abs((app.ahora_ar() - app.datetime.fromisoformat(cli["pin_cambiado"])).total_seconds()) < 120)
+
+_fecha_regalo = cli["pin_cambiado"]
+c.post(f"/admin/{K}", data={"accion": "nuevo_pin", "alias": _alias, "cual": "premio"},
+       follow_redirects=True)
+cli = app.get_cliente(_alias)
+chequear("renovar el de premio no toca la fecha del de regalo",
+         cli["pin_cambiado"] == _fecha_regalo)
+chequear("y deja la suya", bool(cli["pin_premio_cambiado"]))
+
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("el admin muestra desde cuando rige cada codigo",
+         adm.count("desde el ") >= 2, adm.count("desde el "))
+
+# Un codigo viejo (los que ya existian) no tiene fecha: se dice, no se inventa.
+app.guardar_cliente(_alias, {"pin_cambiado": None})
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("sin fecha dice 'desde antes', no una fecha inventada",
+         "desde antes" in adm)
+
+# Un codigo de muchos meses se marca.
+_viejo = (app.ahora_ar() - app.timedelta(days=400)).isoformat()
+app.guardar_cliente(_alias, {"pin_cambiado": _viejo})
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("un codigo de hace mas de 6 meses sale marcado",
+         "400 dias" in adm, [l for l in adm.split("\n") if "dias)" in l][:1])
 
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)

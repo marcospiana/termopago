@@ -6,6 +6,7 @@ import psycopg2.extras
 import uuid
 import io
 import secrets
+import re
 import requests
 import threading
 import time
@@ -365,6 +366,12 @@ def init_db():
     # COMO queda registrada la entrega (regalo vs premio por carga), asi el
     # motivo no depende de lo que el usuario apriete sino del codigo que tiene.
     cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_premio TEXT")
+    # Cuando se genero cada codigo. Sin esto, si el cliente discute una
+    # entrega no hay forma de saber si el codigo cambio antes o despues.
+    # Los codigos que ya existen quedan en NULL: no hay de donde sacar la
+    # fecha, se muestran como 'desde antes' hasta que se renueven.
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_cambiado TEXT")
+    cur.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS pin_premio_cambiado TEXT")
     # motivo: por que se entrego una ficha sin cobrar ('regalo' | 'premio').
     # NULL en las filas viejas = regalo, que era lo unico que existia.
     cur.execute("ALTER TABLE ordenes ADD COLUMN IF NOT EXISTS motivo TEXT")
@@ -452,6 +459,41 @@ def guardar_cliente(alias, campos):
     conn.commit()
     cur.close()
     conn.close()
+
+CAMPO_FECHA_PIN = {"pin": "pin_cambiado", "pin_premio": "pin_premio_cambiado"}
+
+def guardar_pin(alias, campo, pin, extra=None):
+    """Guarda un codigo del cliente y DEJA LA FECHA en el mismo UPDATE.
+
+    Todo el que escribe pin/pin_premio pasa por aca: si alguno guardara el
+    codigo por su cuenta, la fecha quedaria vieja y mentiria, que es peor
+    que no tenerla."""
+    campos = {campo: pin, CAMPO_FECHA_PIN[campo]: ahora_ar().isoformat()}
+    if extra:
+        campos.update(extra)
+    guardar_cliente(alias, campos)
+
+
+def sin_html(txt):
+    """Texto plano. El mensaje del admin viaja por la URL del redirect y se
+    re-escapa al mostrarlo, asi que las etiquetas tienen que salir ahora o
+    se verian literales."""
+    return re.sub(r"<[^>]+>", "", txt or "")
+
+
+def desde_pin(f):
+    """'desde el 14/10' para mostrar al lado de un codigo en el admin."""
+    if not f:
+        return '<span class="mut">desde antes</span>'
+    try:
+        d = datetime.fromisoformat(f)
+    except (ValueError, TypeError):
+        return ""
+    dias = (ahora_ar() - d).days
+    if dias >= 180:
+        return f'<span class="warn">desde el {d.strftime("%d/%m/%y")} ({dias} dias)</span>'
+    return f'<span class="mut">desde el {d.strftime("%d/%m")}</span>'
+
 
 def token_cliente(alias):
     """Access Token de un cliente OAuth, renovándolo si está por vencer
@@ -1057,7 +1099,7 @@ def panel_link(clave, alias):
     pin = cli.get("pin")
     if not pin:
         pin = f"{secrets.randbelow(10000):04d}"
-        guardar_cliente(alias, {"pin": pin})
+        guardar_pin(alias, "pin", pin)
     return jsonify({
         "cliente": alias,
         "nombre": cli.get("nombre"),
@@ -1497,11 +1539,11 @@ def asegurar_panel(alias):
     pin = cli.get("pin")
     if not pin:
         pin = _pin_nuevo()
-        guardar_cliente(alias, {"pin": pin})
+        guardar_pin(alias, "pin", pin)
     pin_premio = cli.get("pin_premio")
     if not pin_premio:
         pin_premio = _pin_nuevo(distinto_de=pin)
-        guardar_cliente(alias, {"pin_premio": pin_premio})
+        guardar_pin(alias, "pin_premio", pin_premio)
     return f"{BASE_URL}/panel/{token}", pin, pin_premio
 
 def _pin_nuevo(distinto_de=""):
@@ -1630,7 +1672,9 @@ def _admin_post(clave):
         pin = _pin_nuevo(distinto_de=otro)
         # PIN nuevo = borrón y cuenta nueva: se levanta cualquier bloqueo por
         # intentos fallidos, así el cliente puede usarlo en el momento.
-        guardar_cliente(alias, {campo: pin, "pin_fallidos": 0, "pin_bloqueado_hasta": None})
+        guardar_pin(alias, campo, pin,
+                    {"pin_fallidos": 0, "pin_bloqueado_hasta": None})
+        print(f"[PIN] {alias}: codigo de {cual} regenerado desde el admin")
         return (f"🔑 Código de <b>{MOTIVOS.get(cual, cual)}</b> nuevo de "
                 f"<b>{_esc(cli.get('nombre') or alias)}</b>: <b>{pin}</b>. "
                 f"El anterior dejó de servir — pasale este.")
@@ -1697,7 +1741,14 @@ def admin_panel(clave):
     if clave != CLAVE_SECRETA:
         return "No autorizado", 403
 
-    mensaje = _admin_post(clave) if request.method == "POST" else ""
+    # POST/Redirect/GET. Sin esto un F5, un 'atras' o la restauracion de la
+    # pestaña REENVIAN el ultimo formulario, y la accion se ejecuta de nuevo
+    # en silencio: en el reenvio el confirm() del onsubmit no corre. Para
+    # 'generar codigo nuevo' eso significa cambiarle el codigo al cliente sin
+    # que nadie lo pida. Es el mismo bug que tenia el panel del cliente.
+    if request.method == "POST":
+        return redirect(f"/admin/{clave}?m={quote(sin_html(_admin_post(clave)))}")
+    mensaje = _esc(request.args.get("m", "")[:400])
     ahora = ahora_ar()
     dispositivos = get_dispositivos()
     clientes = get_clientes()
@@ -1780,6 +1831,9 @@ def admin_panel(clave):
         alias = cli["alias"]
         maquinas = por_cliente.get(alias, [])
         panel, pin, pin_premio = asegurar_panel(alias)
+        # asegurar_panel pudo recien crear un codigo: releemos para que la
+        # fecha que mostramos sea la real y no una en blanco.
+        cli = get_cliente(alias) or cli
         tiene_oauth = bool(cli.get("access_token"))
         oauth = link_oauth(alias)
         if tiene_oauth:
@@ -1807,7 +1861,7 @@ def admin_panel(clave):
     <h2>{_esc(cli.get('nombre') or alias)} <small class="mut">{_esc(alias)}</small></h2>
     <p class="meta">{estado_mp}
        · Panel del cliente: <a href="{panel}" target="_blank">{panel}</a>
-       · Código regalo <b>{_esc(pin)}</b>
+       · Código regalo <b>{_esc(pin)}</b> <small>{desde_pin(cli.get('pin_cambiado'))}</small>
       <form method="post" style="display:inline"
             onsubmit="return confirm('Generar un código de REGALO nuevo? El actual deja de servir.')">
         <input type="hidden" name="accion" value="nuevo_pin">
@@ -1815,7 +1869,7 @@ def admin_panel(clave):
         <input type="hidden" name="alias" value="{_esc(alias)}">
         <button class="btn mini gris" type="submit">Nuevo</button>
       </form>
-       · Código premio por carga <b>{_esc(pin_premio)}</b>
+       · Código premio por carga <b>{_esc(pin_premio)}</b> <small>{desde_pin(cli.get('pin_premio_cambiado'))}</small>
       <form method="post" style="display:inline"
             onsubmit="return confirm('Generar un código de PREMIO nuevo? El actual deja de servir.')">
         <input type="hidden" name="accion" value="nuevo_pin">
