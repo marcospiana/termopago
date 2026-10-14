@@ -932,14 +932,25 @@ def webhook():
             # las dos queda en riesgo.) Se pasa el id completo de la orden para
             # que coincida con el orden_id de /orden (dedup en el esclavo).
             if dispositivo_id in ESTACIONES_MQTT:
-                if publicar_activacion(dispositivo_id, oid):
+                _despachado = publicar_activacion(dispositivo_id, oid)
+                if _despachado:
                     if dispositivo_id in ESTACIONES_PULSO:
                         marcar_orden(oid, "completada")
                     else:
                         marcar_ejecutando(oid)
-            disp = get_dispositivo(dispositivo_id)
-            if disp:
-                rearmar_qr(disp)  # dejar el QR listo para el próximo cliente
+            else:
+                _despachado = True      # cajas viejas: las sirve el polling de /orden
+            if _despachado:
+                disp = get_dispositivo(dispositivo_id)
+                if disp:
+                    rearmar_qr(disp)  # dejar el QR listo para el próximo cliente
+            else:
+                # No pudimos despachar el pago (tipicamente: broker caido). La
+                # orden queda 'pendiente' y vigilar_ordenes la reintenta. Mientras
+                # tanto BAJAMOS el QR en vez de re-armarlo, para que el proximo
+                # cliente no caiga en el mismo pozo. Se re-arma solo con el
+                # siguiente heartbeat, cuando el equipo vuelva a estar alcanzable.
+                bajar_qr_sin_servicio(dispositivo_id)
         return "ok", 200
 
     # Formato IPN legacy (merchant_order)
@@ -3292,6 +3303,22 @@ def historial(clave, cuantos=40):
 
 # ─── Reembolso automático de pagos no atendidos ──────────────────
 
+def bajar_qr_sin_servicio(caja):
+    """No se pudo despachar un pago a esa caja (tipicamente: el broker no
+    responde). Baja su QR y el de sus hermanas del mismo ESP para que nadie mas
+    pague algo que no se va a entregar. Se re-arma solo con el proximo heartbeat.
+    Devuelve la lista de cajas que quedaron sin QR."""
+    bajadas = []
+    for hid in cajas_hermanas(caja):
+        hdisp = get_dispositivo(hid)
+        if hdisp and hdisp.get("orden_qr_id"):
+            cancelar_orden_qr(hdisp)
+            actualizar_dispositivo(hid, {"orden_qr_id": None, "ultimo_rearme": None})
+            bajadas.append(hid)
+            print(f"QR de {hid} bajado: no se pudo despachar un pago")
+    return bajadas
+
+
 def equipo_offline(disp):
     """True si el ESP32 del dispositivo no consulta hace más de 2 minutos."""
     if not disp or not disp.get("ultimo_poll"):
@@ -3339,30 +3366,70 @@ def marcar_ejecutando(orden_id):
     cur.close()
     conn.close()
 
+def reintentar_despacho(orden):
+    """Vuelve a intentar despachar una orden que quedo 'pendiente'. En una caja
+    MQTT eso significa que el publish del webhook fallo: si hubiera salido, la
+    orden ya estaria 'completada' o 'ejecutando'. Si el broker volvio, el cliente
+    recibe su servicio con unos minutos de demora en vez de perderlo.
+    Devuelve True si esta vez salio."""
+    caja = orden["dispositivo_id"]
+    if caja not in ESTACIONES_MQTT:
+        return False            # cajas viejas: las sirve el polling de /orden
+    if not publicar_activacion(caja, orden["id"]):
+        return False
+    if caja in ESTACIONES_PULSO:
+        marcar_orden(orden["id"], "completada", solo_si="pendiente")
+    else:
+        marcar_ejecutando(orden["id"])
+    print(f"Orden {orden['id']} despachada en el reintento (el primer envio habia fallado)")
+    return True
+
+
 def vigilar_ordenes():
-    """Cada minuto: si una orden pagada lleva más de REEMBOLSO_MINUTOS
-    esperando y el equipo está sin conexión, se devuelve el dinero.
-    Si el equipo está online (solo ocupado, con fila), no se toca."""
+    """Cada minuto: reintenta despachar las ordenes pagadas que quedaron sin
+    salir, y si pasaron mas de REEMBOLSO_MINUTOS sin entregarse, devuelve el
+    dinero."""
     while True:
         try:
             limite = (ahora_ar() - timedelta(minutes=REEMBOLSO_MINUTOS)).isoformat()
             conn = get_db()
             cur = conn.cursor()
-            cur.execute("SELECT * FROM ordenes WHERE estado='pendiente' AND fecha < %s", (limite,))
-            viejas = cur.fetchall()
+            cur.execute("SELECT * FROM ordenes WHERE estado='pendiente'")
+            pendientes = cur.fetchall()
             cur.close()
             conn.close()
-            for o in viejas:
+
+            # 1) Las que todavia estan a tiempo: reintentar el despacho.
+            for o in pendientes:
+                if o["fecha"] >= limite:
+                    try:
+                        reintentar_despacho(o)
+                    except Exception as e:
+                        print(f"Reintento de {o['id']} fallo: {e}")
+
+            # 2) Las que pasaron la ventana sin entregarse: reembolso.
+            for o in pendientes:
+                if o["fecha"] >= limite:
+                    continue
                 disp = get_dispositivo(o["dispositivo_id"])
-                if not equipo_offline(disp):
-                    continue  # el equipo está vivo: es fila de espera, no un corte
-                # transición atómica: solo un proceso la toma
+                # En una caja MQTT, 'pendiente' quiere decir que el despacho NUNCA
+                # salio (un publish exitoso la marca en el acto). Entonces se
+                # reembolsa por lo que PASO, no por como se ve la maquina ahora:
+                # si el broker se cayo y volvio, el equipo parece sano y el cliente
+                # igual se quedo sin su servicio. Antes ese caso no se reembolsaba
+                # nunca: la orden quedaba 'pendiente' para siempre, en silencio.
+                # En las cajas viejas por polling, 'pendiente' si puede ser "esta
+                # esperando que el ESP consulte", y ahi el filtro sigue valiendo.
+                if o["dispositivo_id"] not in ESTACIONES_MQTT and not equipo_offline(disp):
+                    continue  # equipo vivo que todavia no polleo: no es un corte
+                # transición atómica: solo un proceso la toma (y si el reintento
+                # de arriba la despacho recien, esto falla y no se reembolsa)
                 if not marcar_orden(o["id"], "vencida", solo_si="pendiente"):
                     continue
                 if o["id"].startswith("ord_"):
                     if reembolsar_orden_mp(o):
                         marcar_orden(o["id"], "reembolsada")
-                        print(f"Orden {o['id']} reembolsada (equipo sin conexión)")
+                        print(f"Orden {o['id']} reembolsada (nunca se pudo entregar)")
                     else:
                         print(f"Orden {o['id']} vencida — REEMBOLSO MANUAL requerido")
                 else:

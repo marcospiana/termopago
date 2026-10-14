@@ -860,5 +860,93 @@ chequear("el umbral del sordo (180s) es mayor que el latido del ESP (60s)",
 chequear("y el de frescura del will deja pasar un will real (>=90s)",
          app.LWT_FRESCURA_S < 90, app.LWT_FRESCURA_S)
 
+print("\n== Pago que entra con el broker caido ==")
+# El agujero: publicar_activacion falla -> la orden queda 'pendiente' y nadie la
+# reintenta. Y el reembolso solo miraba equipo_offline(), que se juzga por el
+# ultimo_poll: si el broker vuelve, el equipo PARECE sano y la orden se quedaba
+# en 'pendiente' para siempre. El cliente pagaba, no recibia nada, y tampoco se
+# le devolvia la plata.
+
+_pub_ok = {"v": True}
+app.publicar_activacion = lambda caja, pago, segundos_override=None: _pub_ok["v"]
+_reembolsadas = []
+app.reembolsar_orden_mp = lambda o: (_reembolsadas.append(o["id"]) or True)
+app.cancelar_orden_qr = lambda d: None
+
+def _estado_de(oid):
+    cx = app.get_db(); cc = cx.cursor()
+    cc.execute("SELECT estado FROM ordenes WHERE id=%s", (oid,))
+    r = cc.fetchone(); cc.close(); cx.close()
+    return r and r["estado"]
+
+def _orden_vieja(oid, caja, minutos):
+    """Una orden pagada hace N minutos que nunca se despacho."""
+    app.insertar_orden(oid, caja, 300, 500)
+    cx = app.get_db(); cc = cx.cursor()
+    cc.execute("UPDATE ordenes SET fecha=%s WHERE id=%s",
+               ((app.ahora_ar() - app.timedelta(minutes=minutos)).isoformat(), oid))
+    cx.commit(); cc.close(); cx.close()
+
+# --- el reintento entrega lo que el primer envio no pudo ---
+_pub_ok["v"] = False
+_orden_vieja("ord_reintento", "aspiradora01", 1)      # dentro de la ventana
+chequear("quedo pendiente cuando fallo el publish", _estado_de("ord_reintento") == "pendiente")
+_pub_ok["v"] = True                                    # volvio el broker
+chequear("el reintento la despacha",
+         app.reintentar_despacho({"id": "ord_reintento", "dispositivo_id": "aspiradora01"}))
+chequear("y pasa a ejecutando (caja sostenida)",
+         _estado_de("ord_reintento") == "ejecutando", _estado_de("ord_reintento"))
+
+# --- una expendedora se marca completada, no ejecutando ---
+_orden_vieja("ord_fichas", "villagas01", 1)
+app.reintentar_despacho({"id": "ord_fichas", "dispositivo_id": "villagas01"})
+chequear("una caja de pulso/fichas queda completada",
+         _estado_de("ord_fichas") == "completada", _estado_de("ord_fichas"))
+
+# --- con el broker todavia caido, el reintento no miente ---
+_pub_ok["v"] = False
+_orden_vieja("ord_sigue_caido", "aspiradora01", 1)
+chequear("si sigue sin broker, no la despacha",
+         not app.reintentar_despacho({"id": "ord_sigue_caido", "dispositivo_id": "aspiradora01"}))
+chequear("y la deja pendiente para el proximo intento",
+         _estado_de("ord_sigue_caido") == "pendiente")
+
+# --- EL CASO QUE SE PERDIA: equipo que volvio, orden nunca entregada ---
+_reembolsadas.clear()
+_orden_vieja("ord_perdida", "aspiradora01", app.REEMBOLSO_MINUTOS + 2)
+app.actualizar_dispositivo("aspiradora01", {"ultimo_poll": app.ahora_ar().isoformat()})
+chequear("el equipo se ve online (el broker volvio)",
+         not app.equipo_offline(app.get_dispositivo("aspiradora01")))
+# una sola pasada del vigilante, sin el sleep
+_pub_ok["v"] = False
+import threading as _th
+_t = _th.Thread(target=app.vigilar_ordenes, daemon=True); _t.start()
+import time as _time; _time.sleep(1.5)
+chequear("AHORA SI se reembolsa aunque el equipo parezca sano",
+         "ord_perdida" in _reembolsadas, _reembolsadas)
+chequear("y queda marcada como reembolsada",
+         _estado_de("ord_perdida") == "reembolsada", _estado_de("ord_perdida"))
+
+# --- una caja vieja por polling conserva el filtro de siempre ---
+_reembolsadas.clear()
+_orden_vieja("ord_legacy", "termo_001", app.REEMBOLSO_MINUTOS + 2)
+app.actualizar_dispositivo("termo_001", {"ultimo_poll": app.ahora_ar().isoformat()})
+_time.sleep(1.5)
+chequear("caja legacy online: sigue sin reembolsarse (puede estar por pollear)",
+         "ord_legacy" not in _reembolsadas, _reembolsadas)
+chequear("y sigue pendiente", _estado_de("ord_legacy") == "pendiente")
+
+print("\n== Bajar el QR cuando no se pudo despachar ==")
+app.actualizar_dispositivo("aspiradora01", {"orden_qr_id": "orden_a01"})
+app.actualizar_dispositivo("soplado01", {"orden_qr_id": "orden_s01"})
+bajadas = app.bajar_qr_sin_servicio("aspiradora01")
+chequear("baja el QR de la caja y el de su hermana del mismo ESP",
+         set(bajadas) == {"aspiradora01", "soplado01"}, bajadas)
+chequear("quedan sin QR, listas para re-armarse con el proximo latido",
+         not app.get_dispositivo("aspiradora01")["orden_qr_id"]
+         and not app.get_dispositivo("soplado01")["orden_qr_id"])
+chequear("llamarlo de nuevo no rompe ni cancela dos veces",
+         app.bajar_qr_sin_servicio("aspiradora01") == [])
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
