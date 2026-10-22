@@ -1325,6 +1325,7 @@ def panel_cliente(token):
     def nuevo(): return {"ventas": 0, "monto": 0.0}
     tot_hoy, tot_mes, tot_all = nuevo(), nuevo(), nuevo()
     por_dia = {}
+    por_dia_regalos = {}
     rows = []
     if mis_ids:
         conn = get_db()
@@ -1347,7 +1348,13 @@ def panel_cliente(token):
         mes_actual = ahora.strftime("%Y-%m")
         for r in rows:
             if (r["id"] or "").startswith("gift_"):
-                continue   # las regaladas se muestran en la lista pero NO facturan
+                # No facturan, pero van a su propio cuadro por dia. Se acumula
+                # aca y no desde regalo_rows, que esta cortada en 25 filas.
+                acc = por_dia_regalos.setdefault((r["fecha"] or "")[:10],
+                                                 {k: 0 for k in MOTIVOS})
+                mot = r.get("motivo")
+                acc[mot if mot in MOTIVOS else MOTIVO_DEFECTO] += 1
+                continue
             dia = (r["fecha"] or "")[:10]
             m = float(r["monto"] or 0)
             for dest in (por_dia.setdefault(dia, nuevo()), tot_all):
@@ -1446,6 +1453,20 @@ def panel_cliente(token):
     if not filas_dia:
         filas_dia = '<tr><td colspan="3">Sin datos</td></tr>'
 
+    # Mismo cuadro que el de ventas, pero de las entregas sin cargo. Abierto
+    # por motivo: el total solo no responde la pregunta que el cliente se hace,
+    # que es cuantas fueron regalo y cuantas premio por carga.
+    th_motivos = "".join(f'<th>{v}</th>' for v in MOTIVOS.values())
+    filas_dia_regalos = ""
+    for k in sorted(por_dia_regalos.keys(), reverse=True)[:30]:
+        d = por_dia_regalos[k]
+        filas_dia_regalos += (f'<tr><td>{k}</td>'
+                              + "".join(f'<td>{d[m]}</td>' for m in MOTIVOS)
+                              + f'<td><b>{sum(d.values())}</b></td></tr>')
+    if not filas_dia_regalos:
+        filas_dia_regalos = (f'<tr><td colspan="{len(MOTIVOS) + 2}">'
+                             'Sin entregas sin cargo todavia</td></tr>')
+
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1503,6 +1524,9 @@ def panel_cliente(token):
 
 <h3>📅 Por dia (ultimos 30)</h3>
 <table><tr><th>Dia</th><th>Ventas</th><th>Facturado</th></tr>{filas_dia}</table>
+
+<h3>🎁 Fichas sin cargo por dia (ultimos 30)</h3>
+<table><tr><th>Dia</th>{th_motivos}<th>Total</th></tr>{filas_dia_regalos}</table>
 
 <p class="sub" style="margin-top:22px">Los montos se registran desde julio 2026; ventas anteriores pueden figurar en $0.</p>
 </body></html>"""

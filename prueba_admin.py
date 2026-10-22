@@ -948,5 +948,65 @@ chequear("quedan sin QR, listas para re-armarse con el proximo latido",
 chequear("llamarlo de nuevo no rompe ni cancela dos veces",
          app.bajar_qr_sin_servicio("aspiradora01") == [])
 
+print("\n== 20. Cuadro de fichas sin cargo por dia ==")
+_cli = app.get_cliente("lavadero") or app.get_cliente("lava_dero")
+_alias = _cli["alias"]
+tok = _cli["panel_token"]
+app.actualizar_dispositivo("lavadero03", {"cliente": _alias})
+
+def _borrar_gifts():
+    conn = app.get_db(); cur = conn.cursor()
+    cur.execute("DELETE FROM ordenes")
+    conn.commit(); cur.close(); conn.close()
+
+def _gift(oid, cuando, motivo):
+    conn = app.get_db(); cur = conn.cursor()
+    cur.execute("INSERT INTO ordenes (id, dispositivo_id, segundos, estado, fecha, monto, motivo)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (oid, "lavadero03", 1, "regalada", cuando.isoformat(), 0, motivo))
+    conn.commit(); cur.close(); conn.close()
+
+_borrar_gifts()
+r = c.get(f"/panel/{tok}")
+chequear("sin entregas, el cuadro lo dice",
+         "Sin entregas sin cargo todavia" in r.get_data(as_text=True))
+
+# 6 dias x 6 fichas (4 regalo + 2 premio). El dia mas viejo cae FUERA de las 25
+# filas de la lista de arriba: si el cuadro se armara desde esa lista cortada,
+# ese dia desapareceria sin avisar.
+_hoy = app.ahora_ar()
+_n = 0
+for _d in range(6):
+    _f = _hoy - app.timedelta(days=_d)
+    for _i in range(6):
+        _n += 1
+        _gift(f"gift_d{_d}_{_i}", _f.replace(hour=9 + _i, minute=0),
+              "regalo" if _i < 4 else "premio")
+
+cuerpo = c.get(f"/panel/{tok}").get_data(as_text=True)
+_viejo = (_hoy - app.timedelta(days=5)).strftime("%Y-%m-%d")
+_fila = f"<tr><td>{_viejo}</td><td>4</td><td>2</td><td><b>6</b></td></tr>"
+chequear("el dia mas viejo aparece aunque quede fuera de las 25 ultimas",
+         _fila in cuerpo, [l for l in cuerpo.split("<tr>") if _viejo in l][:1])
+chequear("hay una fila por dia", cuerpo.count("<td><b>6</b></td>") == 6,
+         cuerpo.count("<td><b>6</b></td>"))
+chequear("el cuadro tiene las dos columnas de motivo",
+         "<th>Regalo</th>" in cuerpo and "<th>Premio por carga</th>" in cuerpo)
+
+# Una fila vieja sin motivo (de cuando habia un solo PIN) cuenta como regalo,
+# no se pierde ni rompe la suma.
+_borrar_gifts()
+_gift("gift_viejo", _hoy, None)
+cuerpo = c.get(f"/panel/{tok}").get_data(as_text=True)
+_dia_hoy = _hoy.strftime("%Y-%m-%d")
+chequear("una entrega sin motivo cuenta como regalo",
+         f"<tr><td>{_dia_hoy}</td><td>1</td><td>0</td><td><b>1</b></td></tr>" in cuerpo,
+         [l for l in cuerpo.split("<tr>") if _dia_hoy in l][:2])
+
+# Las regaladas no pueden colarse en el cuadro de ventas.
+chequear("no facturan: el cuadro de ventas sigue vacio",
+         ">Sin datos<" in cuerpo)
+_borrar_gifts()
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)
