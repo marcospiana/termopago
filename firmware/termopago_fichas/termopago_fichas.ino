@@ -185,7 +185,7 @@ const uint32_t MQTT_RETRY_MS      = 5000UL;      // reintento de conexion al bro
 const uint32_t SIN_COMM_TIMEOUT   = 90000UL;     // sin conexion MQTT > 90 s -> reinicio
 const uint32_t REINICIO_PREVENT   = 21600000UL;  // 6 h en reposo -> reinicio preventivo
 const uint32_t LCD_REINIT_MS      = 300000UL;    // reinit LCD cada 5 min
-const uint32_t WDT_TIMEOUT_S      = 15;          // watchdog
+const uint32_t WDT_TIMEOUT_S      = 30;          // watchdog (30s: margen sobre el connect MQTT de 8s; antes 15 empataba con el socket timeout de PubSubClient y disparaba task_wdt en reconexiones lentas)
 
 // El include va DESPUES de los #define de arriba, que son los que lo configuran.
 #include "dispensador.h"
@@ -759,6 +759,7 @@ void setup() {
   }
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
+  mqtt.setSocketTimeout(8);       // connect()/socket NO pueden colgarse mas de 8s (default PubSubClient = 15s, que empataba con el watchdog y disparaba task_wdt en reconexiones lentas al broker)
   mqtt.setBufferSize(512);        // JSON + TLS: subir el buffer (default 256 es justo)
   mqtt.setCallback(mqttCallback);
   mqttConectar();

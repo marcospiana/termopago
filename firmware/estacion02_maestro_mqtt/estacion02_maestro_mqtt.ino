@@ -396,6 +396,7 @@ void setup() {
   }
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
+  mqtt.setSocketTimeout(8);       // connect()/socket NO pueden colgarse mas de 8s (default PubSubClient = 15s, que empataba con el watchdog y disparaba task_wdt en reconexiones lentas al broker)
   mqtt.setBufferSize(512);
   mqtt.setCallback(mqttCallback);
   mqttConectar();

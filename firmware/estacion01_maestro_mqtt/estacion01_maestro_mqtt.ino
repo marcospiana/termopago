@@ -10,6 +10,8 @@
 // aunque el maestro pierda WiFi o se reinicie. El maestro NO tiene reles ni LCD.
 //
 // HTTP puntual (NO fragmenta: el problema era el handshake CADA 4s):
+//   - al volver de un corte del broker: GET /orden/<id> por canal, para cobrar
+//     los pagos que entraron mientras no habia MQTT (camino independiente).
 //   - al bootear: GET /orden/<id> por canal, para retomar un servicio que
 //     quedo a mitad por un corte de luz (el /orden devuelve el restante).
 //   - al terminar un servicio: GET /completar/<id>.
@@ -63,11 +65,18 @@ const uint32_t HEARTBEAT_MS     = 60000UL;
 const uint32_t MQTT_KEEPALIVE_S = 60;
 const uint32_t MQTT_RETRY_MS    = 5000UL;
 const uint32_t SIN_COMM_TIMEOUT = 90000UL;    // sin MQTT > 90s (en reposo) -> reinicio
+// Si estuvimos mas de esto sin broker, al volver preguntamos por HTTP si quedo
+// algun pago sin entregar: mientras no habia MQTT, el backend no pudo avisarnos.
+const uint32_t RECUPERAR_TRAS_MS = 30000UL;
 const uint32_t REINICIO_PREVENT = 21600000UL; // 6h en reposo -> reinicio limpio
 
 // ── Estado ────────────────────────────────────────────────────────
 WiFiClientSecure espClient;
 PubSubClient     mqtt(espClient);
+
+// Reconexion al broker: cuando se cayo y si hay que ir a buscar pagos perdidos.
+uint32_t mqttCaidoDesde  = 0;      // 0 = no estamos caidos
+bool     pedirPendientes = false;  // lo atiende el loop (el GET bloquea)
 
 bool          activo[NUM_CANALES]  = {false, false};
 unsigned long finMs[NUM_CANALES]   = {0, 0};
@@ -194,6 +203,12 @@ void activarCanal(int canal, int seg, const String& orden) {
       colaSeg[canal][colaLen[canal]]   = seg;
       colaLen[canal]++;
       Serial.printf("[COLA] %s encolado en canal %d. En cola: %d\n", orden.c_str(), canal, colaLen[canal]);
+    } else {
+      // Descarte. Por MQTT la orden sigue 'pendiente' y el backend la
+      // reembolsa; aun asi tiene que quedar registrado, porque mudo es
+      // indistinguible de que el pago nunca haya llegado.
+      Serial.printf("[COLA] canal %d LLENO (%d): se descarta %s\n",
+                    canal, MAX_COLA, orden.c_str());
     }
     return;
   }
@@ -259,10 +274,55 @@ bool mqttConectar() {
 }
 
 void asegurarMqtt() {
-  if (mqtt.connected()) { ultimoMqttOk = millis(); return; }
+  if (mqtt.connected()) { ultimoMqttOk = millis(); mqttCaidoDesde = 0; return; }
+  if (mqttCaidoDesde == 0) mqttCaidoDesde = millis();   // primer loop sin broker
   if (millis() - ultimoIntentoMqtt < MQTT_RETRY_MS) return;
   ultimoIntentoMqtt = millis();
-  mqttConectar();
+  uint32_t estuvoCaido = millis() - mqttCaidoDesde;
+  if (mqttConectar()) {
+    // Volvio el broker. Si el hueco fue largo, pudo haber entrado un pago que
+    // el backend no nos pudo empujar: lo vamos a buscar por HTTP, que es un
+    // camino independiente del broker. El GET bloquea, asi que lo hace el loop.
+    if (estuvoCaido > RECUPERAR_TRAS_MS) {
+      pedirPendientes = true;
+      Serial.printf("[RECUP] volvio el broker tras %lus -> busco pagos sin entregar\n",
+                    (unsigned long)(estuvoCaido / 1000));
+    }
+    mqttCaidoDesde = 0;
+  }
+}
+
+// Pregunta al backend si quedo algun pago sin entregar en cada canal. Usa
+// /orden/<caja>, el mismo endpoint de la recuperacion tras corte de luz: toma la
+// orden 'pendiente' mas vieja (o el restante de una 'ejecutando') y la devuelve.
+// A diferencia de resumeCanal() del arranque, esto pasa por activarCanal(), que
+// deduplica y encola: aca el canal PUEDE estar corriendo algo.
+void recuperarPendientes() {
+  for (int i = 0; i < NUM_CANALES; i++) {
+    watchdogFeed();
+    // No preguntar lo que no vamos a poder atender: /orden NO es una
+    // consulta inocente, el backend marca la orden como 'ejecutando' al
+    // devolverla. Si despues activarCanal() la descarta por cola llena,
+    // queda cobrada, sin entregar y FUERA del reembolso automatico, que
+    // solo mira las 'pendiente'. Dejandola pendiente la agarra el proximo
+    // intento, o el watchdog la devuelve.
+    if (activo[i] && colaLen[i] >= MAX_COLA) {
+      Serial.printf("[RECUP] %s con la cola llena -> no pido pendientes\n", IDS[i]);
+      continue;
+    }
+    String body;
+    if (!httpGet(String("https://") + BACKEND_HOST + "/orden/" + IDS[i], &body)) continue;
+    StaticJsonDocument<300> doc;
+    if (deserializeJson(doc, body)) continue;
+    if (doc["encender"] != true) continue;
+    int seg = doc["segundos"] | 0;
+    String orden = String((const char*)(doc["orden_id"] | ""));
+    if (seg > 5 && orden.length()) {
+      Serial.printf("[RECUP] %s tenia un pago sin entregar (%ds, %s)\n",
+                    IDS[i], seg, orden.c_str());
+      activarCanal(i, seg, orden);
+    }
+  }
 }
 
 // ─── WiFi: portal + auto-lock de la radio (anti band-steering) ────
@@ -400,6 +460,7 @@ void setup() {
   }
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
+  mqtt.setSocketTimeout(8);       // connect()/socket NO pueden colgarse mas de 8s (default PubSubClient = 15s, que empataba con el watchdog y disparaba task_wdt en reconexiones lentas al broker)
   mqtt.setBufferSize(512);
   mqtt.setCallback(mqttCallback);
   mqttConectar();
@@ -436,6 +497,9 @@ void loop() {
 
   asegurarMqtt();
   mqtt.loop();
+
+  // Volvimos de un corte del broker: ir a buscar lo que no nos pudieron empujar.
+  if (pedirPendientes) { pedirPendientes = false; recuperarPendientes(); }
 
   // Timer paralelo: marca fin de servicio y agenda /completar (el rele lo apaga
   // el esclavo por su cuenta). Luego, si hay cola, activa el siguiente.
