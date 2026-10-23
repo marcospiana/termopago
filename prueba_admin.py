@@ -580,7 +580,8 @@ _limpiar()
 r = c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_premio}, follow_redirects=True)
 chequear("el codigo de premio entrega", _motivos() == ["premio"], _motivos())
 chequear("y lo identifica como premio por carga",
-         "Premio por carga" in r.get_data(as_text=True))
+         "Registrada como: Premio." in r.get_data(as_text=True),
+         r.get_data(as_text=True)[:200])
 
 # El motivo sale del CODIGO, no del formulario: mandar motivo a mano no sirve.
 _limpiar()
@@ -608,7 +609,7 @@ c.post(f"/panel/{tok}", data={"accion": "regalar", "pin": pin_premio}, follow_re
 r = c.get(f"/panel/{tok}")
 cuerpo = r.get_data(as_text=True)
 chequear("el panel nombra los dos motivos",
-         "Regalo" in cuerpo and "Premio por carga" in cuerpo)
+         "Regalo: " in cuerpo and "Premio: " in cuerpo)
 chequear("la tabla tiene columna Motivo", "<th>Motivo</th>" in cuerpo)
 
 # Admin: se ven y se renuevan los dos por separado.
@@ -655,7 +656,7 @@ chequear("la fecha es fecha, no texto",
          type(hv.cell(row=2, column=1).value).__name__)
 hs = wb["Entregas sin cargo"]
 chequear("la hoja sin cargo trae el motivo",
-         hs.cell(row=2, column=4).value in ("Regalo", "Premio por carga"),
+         hs.cell(row=2, column=4).value in ("Regalo", "Premio"),
          hs.cell(row=2, column=4).value)
 
 # El rango filtra de verdad.
@@ -991,7 +992,7 @@ chequear("el dia mas viejo aparece aunque quede fuera de las 25 ultimas",
 chequear("hay una fila por dia", cuerpo.count("<td><b>6</b></td>") == 6,
          cuerpo.count("<td><b>6</b></td>"))
 chequear("el cuadro tiene las dos columnas de motivo",
-         "<th>Regalo</th>" in cuerpo and "<th>Premio por carga</th>" in cuerpo)
+         "<th>Regalo</th>" in cuerpo and "<th>Premio</th>" in cuerpo)
 
 # Una fila vieja sin motivo (de cuando habia un solo PIN) cuenta como regalo,
 # no se pierde ni rompe la suma.
@@ -1060,6 +1061,15 @@ chequear("nueve dias se muestran en dias",
          app.version_desplegada()["hace"])
 
 app.COMMIT_SHA, app.COMMIT_MSG, app.GIT_BRANCH = _sha, _msg, _rama
+
+print("\n== 22. La etiqueta corta no se come la explicacion ==")
+cuerpo = c.get(f"/panel/{tok}").get_data(as_text=True)
+chequear("las columnas usan la etiqueta corta",
+         "<th>Premio</th>" in cuerpo and "<th>Premio por carga</th>" not in cuerpo)
+chequear("pero el panel sigue explicando que es cada codigo",
+         "premio por carga" in cuerpo.lower())
+chequear("el admin conserva la frase larga en los codigos",
+         "digo premio por carga" in c.get(f"/admin/{K}").get_data(as_text=True))
 
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)

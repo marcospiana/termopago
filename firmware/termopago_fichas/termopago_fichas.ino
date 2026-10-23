@@ -390,16 +390,23 @@ void reportarBoot() {
 //  WIFI
 // ============================================================================
 void ventanaResetCredenciales() {
-  // 5 s post-boot: si mantenés BOOT apretado, borra credenciales WiFi
+  // 5 s post-boot: si mantenés BOOT apretado, borra SOLO el WiFi.
+  //
+  // El ID de caja NO se borra a proposito. Este boton lo aprieta el cliente
+  // cuando le cambian la red, y si tuviera que re-escribir el ID un error de
+  // tipeo ("villagas1", "Villagas01") deja la maquina encendida, con IP y con
+  // cara de sana, pero sin cobrar un solo pago: los topics MQTT se arman con
+  // ese texto y nadie le avisa a nadie. El ID sigue siendo editable desde el
+  // portal -el campo aparece con el valor actual cargado-, asi que para
+  // reinstalar una caja en otro lado se cambia ahi.
   pinMode(BOOT_PIN, INPUT_PULLUP);
   mostrar("TermoPago", "BOOT=reset 5s");
   uint32_t t0 = millis();
   while (millis() - t0 < 5000) {
     watchdogFeed();
     if (digitalRead(BOOT_PIN) == LOW) {
-      mostrar("Borrando config", "reiniciando");
+      mostrar("Borrando WiFi", "reiniciando");
       WiFiManager wm; wm.resetSettings(); borrarLock();
-      prefs.remove("caja");          // tambien el ID: el portal lo va a volver a pedir
       delay(800);
       ESP.restart();
     }

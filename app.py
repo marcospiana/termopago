@@ -1157,7 +1157,11 @@ GIFT_COOLDOWN_S = 20
 
 # Motivos por los que se entrega una ficha sin cobrar. La clave se guarda en
 # ordenes.motivo; el texto es lo que ve el cliente en el panel y en la planilla.
-MOTIVOS = {"regalo": "Regalo", "premio": "Premio por carga"}
+# La etiqueta corta es a proposito: el cliente mira el panel en el telefono
+# y "Premio por carga" como encabezado de columna desbordaba la tabla. El
+# significado completo se explica una vez, debajo del formulario de entrega,
+# donde hay lugar para la frase entera.
+MOTIVOS = {"regalo": "Regalo", "premio": "Premio"}
 MOTIVO_DEFECTO = "regalo"   # filas viejas, de cuando habia un solo PIN
 
 def texto_motivo(m):
