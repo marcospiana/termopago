@@ -1008,5 +1008,58 @@ chequear("no facturan: el cuadro de ventas sigue vacio",
          ">Sin datos<" in cuerpo)
 _borrar_gifts()
 
+print("\n== 21. Version desplegada visible en el admin ==")
+import time as _time
+
+# Fuera de Railway no hay que inventar nada: se dice que no se sabe.
+_sha, _msg, _rama = app.COMMIT_SHA, app.COMMIT_MSG, app.GIT_BRANCH
+app.COMMIT_SHA = ""
+chequear("sin las variables del entorno no inventa version",
+         app.version_desplegada() is None)
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("y lo dice en la pagina", "no la informa el entorno" in adm)
+
+# Con las variables puestas: sha, mensaje y hace cuanto.
+app.COMMIT_SHA = "abc1234"
+app.COMMIT_MSG = "Panel: cuadro de fichas sin cargo por dia\nsegunda linea que no va"
+app.GIT_BRANCH = "main"
+app.ARRANQUE_TS = _time.time() - 7200      # 2 h
+v = app.version_desplegada()
+chequear("devuelve el sha corto", v["sha"] == "abc1234", v["sha"])
+chequear("solo la primera linea del mensaje",
+         v["msg"] == "Panel: cuadro de fichas sin cargo por dia", v["msg"])
+chequear("y hace cuanto arranco", v["hace"] == "hace 2 h", v["hace"])
+
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("el admin muestra el commit", "abc1234" in adm)
+chequear("y cuando se desplego", "hace 2 h" in adm)
+chequear("no nombra la rama cuando es main", "rama main" not in adm)
+chequear("explica para que sirve", "no se desplego" in adm)
+
+# Una rama que no es main SI se nombra: es justo el caso en que te confundis.
+app.GIT_BRANCH = "pruebas"
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("una rama distinta de main se muestra", "rama pruebas" in adm)
+
+# El mensaje del commit viene de afuera: no puede inyectar HTML.
+app.GIT_BRANCH = "main"
+app.COMMIT_MSG = '<img src=x onerror=alert(1)>'
+adm = c.get(f"/admin/{K}").get_data(as_text=True)
+chequear("el mensaje del commit sale escapado",
+         "<img src=x" not in adm and "&lt;img" in adm)
+
+# Minutos y dias, no solo horas.
+app.COMMIT_MSG = "x"
+app.ARRANQUE_TS = _time.time() - 300
+chequear("menos de una hora se muestra en minutos",
+         app.version_desplegada()["hace"] == "hace 5 min",
+         app.version_desplegada()["hace"])
+app.ARRANQUE_TS = _time.time() - 86400 * 9
+chequear("nueve dias se muestran en dias",
+         app.version_desplegada()["hace"] == "hace 9 d",
+         app.version_desplegada()["hace"])
+
+app.COMMIT_SHA, app.COMMIT_MSG, app.GIT_BRANCH = _sha, _msg, _rama
+
 print("\n" + ("TODO OK" if not fallas else f"FALLARON {len(fallas)}: {fallas}"))
 sys.exit(1 if fallas else 0)

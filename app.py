@@ -29,6 +29,17 @@ DATABASE_URL  = os.environ.get("DATABASE_URL", "").replace("postgres://", "postg
 USER_ID       = "178328412"
 BASE_URL      = "https://web-production-94bbab.up.railway.app"
 
+# ─── Que version esta corriendo ──────────────────────────────────
+# Railway inyecta estas variables en cada deploy. Estan para poder ver,
+# DESDE la propia pagina, que commit esta en el aire: un push que no
+# dispara el deploy no da ningun sintoma -la app anda, con el codigo
+# viejo- y se pueden perder dias trabajando contra una version que no es
+# la desplegada. Paso en octubre de 2026: nueve dias.
+COMMIT_SHA   = (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "")[:7]
+COMMIT_MSG   = (os.environ.get("RAILWAY_GIT_COMMIT_MESSAGE") or "").strip()
+GIT_BRANCH   = (os.environ.get("RAILWAY_GIT_BRANCH") or "").strip()
+ARRANQUE_TS  = time.time()   # el proceso arranca junto con el deploy
+
 # OAuth marketplace (opcional: se activa cargando estas variables en Railway)
 MP_CLIENT_ID     = os.environ.get("MP_CLIENT_ID")
 MP_CLIENT_SECRET = os.environ.get("MP_CLIENT_SECRET")
@@ -1609,6 +1620,33 @@ def _pin_nuevo(distinto_de=""):
     return p
 
 
+def version_desplegada():
+    """Commit en el aire + hace cuanto arranco el proceso (que es cuando se
+    desplego). None fuera de Railway: en local no hay nada que comparar."""
+    if not COMMIT_SHA:
+        return None
+    seg = int(time.time() - ARRANQUE_TS)
+    if   seg < 3600:  hace = f"hace {seg // 60} min"
+    elif seg < 86400: hace = f"hace {seg // 3600} h"
+    else:             hace = f"hace {seg // 86400} d"
+    return {"sha": COMMIT_SHA, "branch": GIT_BRANCH, "hace": hace,
+            "msg": COMMIT_MSG.splitlines()[0][:80] if COMMIT_MSG else ""}
+
+
+def version_html():
+    """Una linea para el encabezado del admin. Compararla con `git log -1`
+    es la forma mas rapida de saber si lo que probas es lo desplegado."""
+    v = version_desplegada()
+    if not v:
+        return ('<p class="meta">Version: no la informa el entorno '
+                '(corriendo fuera de Railway).</p>')
+    rama = f' · rama {_esc(v["branch"])}' if v["branch"] and v["branch"] != "main" else ""
+    msg  = f' · {_esc(v["msg"])}' if v["msg"] else ""
+    return (f'<p class="meta">Corriendo <b>{_esc(v["sha"])}</b>{rama}, '
+            f'desplegado {v["hace"]}{msg}<br>'
+            '<small>Si no coincide con tu <code>git log -1</code>, el push no se desplego.</small></p>')
+
+
 def link_oauth(alias):
     if not (MP_CLIENT_ID and MP_CLIENT_SECRET):
         return None
@@ -2002,6 +2040,7 @@ def admin_panel(clave):
 </style></head><body><div class="wrap">
 <h1>⚙️ TermoPago — Administración</h1>
 <p class="meta">{len(clientes)} cliente(s) · {total_maq} máquina(s)</p>
+{version_html()}
 {f'<div class="msg">{mensaje}</div>' if mensaje else ''}
 
 <div class="caja">
